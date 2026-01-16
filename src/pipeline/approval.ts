@@ -622,3 +622,494 @@ export async function cancelAllPipelineApprovals(
     return { ok: true, data: { cancelledCount } };
   });
 }
+
+// ============================================================================
+// Timeout Handling
+// ============================================================================
+
+/**
+ * Timeout check result for a single approval request.
+ */
+export type TimeoutCheckResult = {
+  /** The approval request that was checked */
+  request: ApprovalRequest;
+  /** Whether the approval timed out */
+  timedOut: boolean;
+  /** The action taken on timeout (if any) */
+  actionTaken?: "expired" | "auto_approved" | "auto_rejected";
+  /** Error message if action failed */
+  error?: string;
+};
+
+/**
+ * Result of checking all approval timeouts.
+ */
+export type CheckTimeoutsResult = {
+  /** Total number of approvals checked */
+  checked: number;
+  /** Number of approvals that timed out */
+  timedOut: number;
+  /** Number of approvals auto-approved */
+  autoApproved: number;
+  /** Number of approvals auto-rejected */
+  autoRejected: number;
+  /** Number of approvals expired (no auto action) */
+  expired: number;
+  /** Individual results for each checked approval */
+  results: TimeoutCheckResult[];
+};
+
+/**
+ * Options for checking timeouts.
+ */
+export type CheckTimeoutsOptions = {
+  /** If true, only check but don't apply any changes (dry run) */
+  dryRun?: boolean;
+  /** Limit check to specific pipeline ID */
+  pipelineId?: string;
+};
+
+/**
+ * Checks and processes timed out approval requests.
+ * For each expired approval:
+ * - If stage has autoApprove: true, automatically approves the stage
+ * - If stage has autoReject: true, automatically rejects the stage
+ * - Otherwise, marks the approval as expired
+ *
+ * @param state - Pipeline service state
+ * @param opts - Options for timeout checking
+ * @returns Summary of timeout processing results
+ */
+export async function checkTimeouts(
+  state: PipelineServiceState,
+  opts?: CheckTimeoutsOptions
+): Promise<CheckTimeoutsResult> {
+  return await ops.locked(state, async () => {
+    await ensureLoaded(state);
+
+    const now = state.deps.nowMs();
+    const results: TimeoutCheckResult[] = [];
+    let autoApproved = 0;
+    let autoRejected = 0;
+    let expired = 0;
+
+    const approvalRequests = state.store?.approvalRequests ?? [];
+    const pipelines = state.store?.pipelines ?? [];
+
+    // Filter pending requests, optionally by pipeline
+    const pendingRequests = approvalRequests.filter((r) => {
+      if (r.status !== "pending") return false;
+      if (opts?.pipelineId && r.pipelineId !== opts.pipelineId) return false;
+      return true;
+    });
+
+    for (const request of pendingRequests) {
+      // Check if the request has expired
+      if (!request.expiresAtMs || now < request.expiresAtMs) {
+        // Not expired, skip
+        results.push({
+          request,
+          timedOut: false,
+        });
+        continue;
+      }
+
+      // Request has timed out - determine action based on stage config
+      const pipeline = pipelines.find((p) => p.id === request.pipelineId);
+      const stage = pipeline?.stages.find((s) => s.id === request.stageId);
+
+      if (!pipeline || !stage) {
+        // Pipeline or stage not found, just expire the request
+        results.push({
+          request,
+          timedOut: true,
+          actionTaken: "expired",
+          error: "Pipeline or stage not found",
+        });
+        if (!opts?.dryRun) {
+          request.status = "expired";
+          request.processedAtMs = now;
+          request.comment = "Timed out - pipeline or stage not found";
+          expired++;
+        }
+        continue;
+      }
+
+      const { approvalConfig } = stage;
+
+      // Determine timeout action based on stage config
+      if (approvalConfig.autoApprove) {
+        // Auto-approve on timeout
+        if (!opts?.dryRun) {
+          request.status = "approved";
+          request.processedAtMs = now;
+          request.processedBy = "system:timeout";
+          request.comment = "Auto-approved on timeout";
+
+          // Transition stage to approved
+          stage.status = "approved";
+          pipeline.updatedAtMs = now;
+
+          // Emit events
+          ops.emit(state, {
+            kind: "approval_event",
+            event: {
+              kind: "approval_timeout",
+              request,
+            },
+          });
+
+          ops.emit(state, {
+            kind: "approval_event",
+            event: {
+              kind: "approval_processed",
+              request,
+              result: {
+                action: "approve",
+                approvedBy: "system:timeout",
+                timestampMs: now,
+                comment: "Auto-approved on timeout",
+                success: true,
+              },
+            },
+          });
+
+          autoApproved++;
+        }
+
+        results.push({
+          request,
+          timedOut: true,
+          actionTaken: "auto_approved",
+        });
+      } else if (approvalConfig.autoReject) {
+        // Auto-reject on timeout
+        if (!opts?.dryRun) {
+          request.status = "rejected";
+          request.processedAtMs = now;
+          request.processedBy = "system:timeout";
+          request.comment = "Auto-rejected on timeout";
+
+          // Transition stage to rejected
+          stage.status = "rejected";
+          pipeline.updatedAtMs = now;
+
+          // If stopOnFailure is set, fail the pipeline
+          if (pipeline.config.stopOnFailure) {
+            pipeline.status = "failed";
+          }
+
+          // Emit events
+          ops.emit(state, {
+            kind: "approval_event",
+            event: {
+              kind: "approval_timeout",
+              request,
+            },
+          });
+
+          ops.emit(state, {
+            kind: "approval_event",
+            event: {
+              kind: "approval_processed",
+              request,
+              result: {
+                action: "reject",
+                approvedBy: "system:timeout",
+                timestampMs: now,
+                comment: "Auto-rejected on timeout",
+                success: true,
+              },
+            },
+          });
+
+          autoRejected++;
+        }
+
+        results.push({
+          request,
+          timedOut: true,
+          actionTaken: "auto_rejected",
+        });
+      } else {
+        // Just expire (no auto action)
+        if (!opts?.dryRun) {
+          request.status = "expired";
+          request.processedAtMs = now;
+          request.comment = "Timed out without action";
+
+          // Emit timeout event
+          ops.emit(state, {
+            kind: "approval_event",
+            event: {
+              kind: "approval_timeout",
+              request,
+            },
+          });
+
+          expired++;
+        }
+
+        results.push({
+          request,
+          timedOut: true,
+          actionTaken: "expired",
+        });
+      }
+    }
+
+    // Persist changes if not a dry run and there were timeouts
+    if (!opts?.dryRun && (autoApproved + autoRejected + expired) > 0) {
+      await persist(state);
+    }
+
+    return {
+      checked: pendingRequests.length,
+      timedOut: autoApproved + autoRejected + expired,
+      autoApproved,
+      autoRejected,
+      expired,
+      results,
+    };
+  });
+}
+
+/**
+ * Gets approval requests that are about to expire.
+ * Useful for sending reminder notifications.
+ *
+ * @param state - Pipeline service state
+ * @param warningThresholdMs - How many ms before expiry to consider "expiring soon"
+ * @returns List of approval queue entries that are expiring soon
+ */
+export async function getExpiringSoon(
+  state: PipelineServiceState,
+  warningThresholdMs: number
+): Promise<ApprovalQueueEntry[]> {
+  return await ops.locked(state, async () => {
+    await ensureLoaded(state);
+
+    const now = state.deps.nowMs();
+    const expiringSoon: ApprovalQueueEntry[] = [];
+
+    const approvalRequests = state.store?.approvalRequests ?? [];
+    const pipelines = state.store?.pipelines ?? [];
+
+    for (const request of approvalRequests) {
+      if (request.status !== "pending") continue;
+      if (!request.expiresAtMs) continue;
+
+      const timeRemaining = request.expiresAtMs - now;
+      if (timeRemaining <= 0 || timeRemaining > warningThresholdMs) continue;
+
+      const pipeline = pipelines.find((p) => p.id === request.pipelineId);
+      if (!pipeline) continue;
+
+      const stage = pipeline.stages.find((s) => s.id === request.stageId);
+      if (!stage) continue;
+
+      expiringSoon.push({
+        request,
+        pipeline,
+        stage,
+        timeRemainingMs: timeRemaining,
+      });
+    }
+
+    // Sort by time remaining (soonest first)
+    expiringSoon.sort((a, b) =>
+      (a.timeRemainingMs ?? 0) - (b.timeRemainingMs ?? 0)
+    );
+
+    return expiringSoon;
+  });
+}
+
+/**
+ * Gets the next expiring approval's time.
+ * Useful for scheduling the next timeout check.
+ *
+ * @param state - Pipeline service state
+ * @returns Timestamp of next expiry or null if no pending expirations
+ */
+export async function getNextExpiryTime(
+  state: PipelineServiceState
+): Promise<number | null> {
+  return await ops.locked(state, async () => {
+    await ensureLoaded(state);
+
+    const now = state.deps.nowMs();
+    let nextExpiry: number | null = null;
+
+    const approvalRequests = state.store?.approvalRequests ?? [];
+
+    for (const request of approvalRequests) {
+      if (request.status !== "pending") continue;
+      if (!request.expiresAtMs) continue;
+      if (request.expiresAtMs <= now) continue;
+
+      if (nextExpiry === null || request.expiresAtMs < nextExpiry) {
+        nextExpiry = request.expiresAtMs;
+      }
+    }
+
+    return nextExpiry;
+  });
+}
+
+/**
+ * Processes a single approval timeout.
+ * This is a convenience function for handling individual timeout events.
+ *
+ * @param state - Pipeline service state
+ * @param requestId - Approval request ID to process
+ * @returns Timeout check result for the request
+ */
+export async function processTimeout(
+  state: PipelineServiceState,
+  requestId: string
+): Promise<TimeoutCheckResult | null> {
+  return await ops.locked(state, async () => {
+    await ensureLoaded(state);
+
+    const now = state.deps.nowMs();
+    const request = state.store?.approvalRequests.find((r) => r.id === requestId);
+
+    if (!request) {
+      return null;
+    }
+
+    if (request.status !== "pending") {
+      return {
+        request,
+        timedOut: false,
+        error: `Request is not pending: ${request.status}`,
+      };
+    }
+
+    // Force timeout processing regardless of expiresAtMs
+    const pipeline = state.store?.pipelines.find((p) => p.id === request.pipelineId);
+    const stage = pipeline?.stages.find((s) => s.id === request.stageId);
+
+    if (!pipeline || !stage) {
+      request.status = "expired";
+      request.processedAtMs = now;
+      request.comment = "Force timed out - pipeline or stage not found";
+
+      await persist(state);
+
+      return {
+        request,
+        timedOut: true,
+        actionTaken: "expired",
+        error: "Pipeline or stage not found",
+      };
+    }
+
+    const { approvalConfig } = stage;
+
+    if (approvalConfig.autoApprove) {
+      request.status = "approved";
+      request.processedAtMs = now;
+      request.processedBy = "system:timeout";
+      request.comment = "Auto-approved on timeout";
+
+      stage.status = "approved";
+      pipeline.updatedAtMs = now;
+
+      ops.emit(state, {
+        kind: "approval_event",
+        event: {
+          kind: "approval_timeout",
+          request,
+        },
+      });
+
+      ops.emit(state, {
+        kind: "approval_event",
+        event: {
+          kind: "approval_processed",
+          request,
+          result: {
+            action: "approve",
+            approvedBy: "system:timeout",
+            timestampMs: now,
+            comment: "Auto-approved on timeout",
+            success: true,
+          },
+        },
+      });
+
+      await persist(state);
+
+      return {
+        request,
+        timedOut: true,
+        actionTaken: "auto_approved",
+      };
+    } else if (approvalConfig.autoReject) {
+      request.status = "rejected";
+      request.processedAtMs = now;
+      request.processedBy = "system:timeout";
+      request.comment = "Auto-rejected on timeout";
+
+      stage.status = "rejected";
+      pipeline.updatedAtMs = now;
+
+      if (pipeline.config.stopOnFailure) {
+        pipeline.status = "failed";
+      }
+
+      ops.emit(state, {
+        kind: "approval_event",
+        event: {
+          kind: "approval_timeout",
+          request,
+        },
+      });
+
+      ops.emit(state, {
+        kind: "approval_event",
+        event: {
+          kind: "approval_processed",
+          request,
+          result: {
+            action: "reject",
+            approvedBy: "system:timeout",
+            timestampMs: now,
+            comment: "Auto-rejected on timeout",
+            success: true,
+          },
+        },
+      });
+
+      await persist(state);
+
+      return {
+        request,
+        timedOut: true,
+        actionTaken: "auto_rejected",
+      };
+    } else {
+      request.status = "expired";
+      request.processedAtMs = now;
+      request.comment = "Timed out without action";
+
+      ops.emit(state, {
+        kind: "approval_event",
+        event: {
+          kind: "approval_timeout",
+          request,
+        },
+      });
+
+      await persist(state);
+
+      return {
+        request,
+        timedOut: true,
+        actionTaken: "expired",
+      };
+    }
+  });
+}
