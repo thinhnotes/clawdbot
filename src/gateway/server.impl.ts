@@ -35,6 +35,7 @@ import { createChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
 import { createGatewayCloseHandler } from "./server-close.js";
 import { buildGatewayCronService } from "./server-cron.js";
+import { buildGatewayPipelineService } from "./server-pipeline.js";
 import { applyGatewayLaneConcurrency } from "./server-lanes.js";
 import { startGatewayMaintenanceTimers } from "./server-maintenance.js";
 import { coreGatewayHandlers } from "./server-methods.js";
@@ -65,6 +66,7 @@ const logChannels = log.child("channels");
 const logBrowser = log.child("browser");
 const logHealth = log.child("health");
 const logCron = log.child("cron");
+const logPipeline = log.child("pipeline");
 const logReload = log.child("reload");
 const logHooks = log.child("hooks");
 const logPlugins = log.child("plugins");
@@ -245,6 +247,13 @@ export async function startGatewayServer(
   });
   let { cron, storePath: cronStorePath } = cronState;
 
+  let pipelineState = buildGatewayPipelineService({
+    cfg: cfgAtStart,
+    deps,
+    broadcast,
+  });
+  let { pipeline, storePath: pipelineStorePath } = pipelineState;
+
   const channelManager = createChannelManager({
     loadConfig,
     channelLogs,
@@ -323,6 +332,7 @@ export async function startGatewayServer(
   let heartbeatRunner = startHeartbeatRunner({ cfg: cfgAtStart });
 
   void cron.start().catch((err) => logCron.error(`failed to start: ${String(err)}`));
+  void pipeline.start().catch((err) => logPipeline.error(`failed to start: ${String(err)}`));
 
   attachGatewayWsHandlers({
     wss,
@@ -343,6 +353,8 @@ export async function startGatewayServer(
       deps,
       cron,
       cronStorePath,
+      pipeline,
+      pipelineStorePath,
       loadGatewayModelCatalog,
       getHealthCache,
       refreshHealthSnapshot: refreshGatewayHealthSnapshot,
@@ -449,6 +461,7 @@ export async function startGatewayServer(
     stopChannel,
     pluginServices,
     cron,
+    pipeline,
     heartbeatRunner,
     nodePresenceTimers,
     broadcast,
