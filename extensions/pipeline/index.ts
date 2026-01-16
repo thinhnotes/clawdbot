@@ -10,6 +10,7 @@ import {
   createPipelineRuntime,
   type PipelineRuntime,
 } from "./src/runtime.js";
+import { registerPipelineCli } from "./src/cli.js";
 
 /**
  * Pipeline Plugin
@@ -645,12 +646,17 @@ const pipelinePlugin = {
     });
 
     // -------------------------------------------------------------------------
-    // CLI Registration (placeholder - implementation in subtask 7.2)
+    // CLI Registration
     // -------------------------------------------------------------------------
 
     api.registerCli(
-      ({ program: _program }) => {
-        // CLI commands will be implemented in subtask 7.2
+      ({ program }) => {
+        registerPipelineCli({
+          program: program as import("commander").Command,
+          config: cfg,
+          ensureRuntime,
+          logger: api.logger,
+        });
       },
       { commands: ["pipeline"] }
     );
