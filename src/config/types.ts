@@ -15,6 +15,7 @@ export * from "./types.imessage.js";
 export * from "./types.messages.js";
 export * from "./types.models.js";
 export * from "./types.msteams.js";
+export * from "./types.pipeline.js";
 export * from "./types.plugins.js";
 export * from "./types.queue.js";
 export * from "./types.sandbox.js";

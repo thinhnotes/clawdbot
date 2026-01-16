@@ -136,6 +136,32 @@ export const ClawdbotSchema = z
         maxConcurrentRuns: z.number().int().positive().optional(),
       })
       .optional(),
+    pipeline: z
+      .object({
+        enabled: z.boolean().optional(),
+        store: z.string().optional(),
+        maxConcurrentRuns: z.number().int().positive().optional(),
+        defaultTimeoutMs: z.number().int().positive().optional(),
+        approvalTimeoutMs: z.number().int().positive().optional(),
+        notificationChannels: z.array(z.string()).optional(),
+        azureDevOps: z
+          .object({
+            organization: z.string().optional(),
+            project: z.string().optional(),
+            pollIntervalMs: z.number().int().positive().optional(),
+            buildTimeoutMs: z.number().int().positive().optional(),
+          })
+          .optional(),
+        approvals: z
+          .object({
+            approvers: z.array(z.string()).optional(),
+            autoApproveOnTimeout: z.boolean().optional(),
+            autoRejectOnTimeout: z.boolean().optional(),
+            reminderBeforeTimeoutMs: z.number().int().positive().optional(),
+          })
+          .optional(),
+      })
+      .optional(),
     hooks: z
       .object({
         enabled: z.boolean().optional(),
