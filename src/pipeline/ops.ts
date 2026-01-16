@@ -23,6 +23,7 @@ import type {
   PipelineStartResult,
   PipelineStatusSummary,
 } from "./state.js";
+import { ensureLoaded, persist, warnIfDisabled } from "./store.js";
 
 // ============================================================================
 // Locking Utility
@@ -43,45 +44,6 @@ export async function locked<T>(
     () => undefined
   );
   return (await next) as T;
-}
-
-// ============================================================================
-// Store Utilities (placeholder until store.ts is created)
-// ============================================================================
-
-/**
- * Ensures the store is loaded before operations.
- * This will be implemented in store.ts
- */
-export async function ensureLoaded(state: PipelineServiceState) {
-  if (state.store) return;
-  // Initialize with empty store - actual loading logic in store.ts
-  state.store = {
-    version: 1,
-    pipelines: [],
-    approvalRequests: [],
-  };
-}
-
-/**
- * Persists store to disk.
- * This will be implemented in store.ts
- */
-export async function persist(_state: PipelineServiceState) {
-  // Will be implemented in store.ts
-}
-
-/**
- * Warns if pipeline service is disabled.
- */
-export function warnIfDisabled(state: PipelineServiceState, action: string) {
-  if (state.deps.pipelineEnabled) return;
-  if (state.warnedDisabled) return;
-  state.warnedDisabled = true;
-  state.deps.log.warn(
-    { enabled: false, action, storePath: state.deps.storePath },
-    "pipeline: service disabled; pipelines will not run automatically"
-  );
 }
 
 // ============================================================================
