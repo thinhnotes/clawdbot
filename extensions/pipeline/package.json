@@ -1,0 +1,13 @@
+{
+  "name": "@clawdbot/pipeline",
+  "version": "2026.1.15",
+  "type": "module",
+  "description": "Clawdbot pipeline plugin for multi-stage CI/CD builds with approval gates",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.47",
+    "zod": "^4.3.5"
+  },
+  "clawdbot": {
+    "extensions": ["./index.ts"]
+  }
+}
