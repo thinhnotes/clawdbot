@@ -1,12 +1,10 @@
 import { Type } from "@sinclair/typebox";
 import { resolveAgentDir } from "../../agents/agent-scope.js";
-import { buildAuthHealthSummary, formatRemainingShort } from "../../agents/auth-health.js";
 import {
   ensureAuthProfileStore,
   resolveAuthProfileDisplayLabel,
   resolveAuthProfileOrder,
 } from "../../agents/auth-profiles.js";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../../agents/defaults.js";
 import { getCustomProviderApiKey, resolveEnvApiKey } from "../../agents/model-auth.js";
 import { loadModelCatalog } from "../../agents/model-catalog.js";
 import {
@@ -14,7 +12,7 @@ import {
   buildModelAliasIndex,
   modelKey,
   normalizeProviderId,
-  resolveConfiguredModelRef,
+  resolveDefaultModelForAgent,
   resolveModelRefFromString,
 } from "../../agents/model-selection.js";
 import { normalizeGroupActivation } from "../../auto-reply/group-activation.js";
@@ -32,13 +30,13 @@ import {
   formatUsageWindowSummary,
   loadProviderUsageSummary,
   resolveUsageProviderId,
-  type UsageProviderId,
 } from "../../infra/provider-usage.js";
 import {
   buildAgentMainSessionKey,
   DEFAULT_AGENT_ID,
   resolveAgentIdFromSessionKey,
 } from "../../routing/session-key.js";
+import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import type { AnyAgentTool } from "./common.js";
 import { readStringParam } from "./common.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./sessions-helpers.js";
@@ -154,6 +152,7 @@ async function resolveModelOverride(params: {
   cfg: ClawdbotConfig;
   raw: string;
   sessionEntry?: SessionEntry;
+  agentId: string;
 }): Promise<
   | { kind: "reset" }
   | {
@@ -167,10 +166,9 @@ async function resolveModelOverride(params: {
   if (!raw) return { kind: "reset" };
   if (raw.toLowerCase() === "default") return { kind: "reset" };
 
-  const configDefault = resolveConfiguredModelRef({
+  const configDefault = resolveDefaultModelForAgent({
     cfg: params.cfg,
-    defaultProvider: DEFAULT_PROVIDER,
-    defaultModel: DEFAULT_MODEL,
+    agentId: params.agentId,
   });
   const currentProvider = params.sessionEntry?.providerOverride?.trim() || configDefault.provider;
   const currentModel = params.sessionEntry?.modelOverride?.trim() || configDefault.model;
@@ -243,6 +241,7 @@ export function createSessionStatusTool(opts?: {
         throw new Error(`Unknown sessionKey: ${requestedKeyRaw}`);
       }
 
+      const configured = resolveDefaultModelForAgent({ cfg, agentId });
       const modelRaw = readStringParam(params, "model");
       let changedModel = false;
       if (typeof modelRaw === "string") {
@@ -250,85 +249,64 @@ export function createSessionStatusTool(opts?: {
           cfg,
           raw: modelRaw,
           sessionEntry: resolved.entry,
+          agentId,
         });
-        const nextEntry: SessionEntry = {
-          ...resolved.entry,
-          updatedAt: Date.now(),
-        };
-        if (selection.kind === "reset" || selection.isDefault) {
-          delete nextEntry.providerOverride;
-          delete nextEntry.modelOverride;
-          delete nextEntry.authProfileOverride;
-          delete nextEntry.authProfileOverrideSource;
-          delete nextEntry.authProfileOverrideCompactionCount;
-        } else {
-          nextEntry.providerOverride = selection.provider;
-          nextEntry.modelOverride = selection.model;
-          delete nextEntry.authProfileOverride;
-          delete nextEntry.authProfileOverrideSource;
-          delete nextEntry.authProfileOverrideCompactionCount;
+        const nextEntry: SessionEntry = { ...resolved.entry };
+        const applied = applyModelOverrideToSessionEntry({
+          entry: nextEntry,
+          selection:
+            selection.kind === "reset"
+              ? {
+                  provider: configured.provider,
+                  model: configured.model,
+                  isDefault: true,
+                }
+              : {
+                  provider: selection.provider,
+                  model: selection.model,
+                  isDefault: selection.isDefault,
+                },
+        });
+        if (applied.updated) {
+          store[resolved.key] = nextEntry;
+          await updateSessionStore(storePath, (nextStore) => {
+            nextStore[resolved.key] = nextEntry;
+          });
+          resolved.entry = nextEntry;
+          changedModel = true;
         }
-        store[resolved.key] = nextEntry;
-        await updateSessionStore(storePath, (nextStore) => {
-          nextStore[resolved.key] = nextEntry;
-        });
-        resolved.entry = nextEntry;
-        changedModel = true;
       }
 
       const agentDir = resolveAgentDir(cfg, agentId);
-      const configured = resolveConfiguredModelRef({
-        cfg,
-        defaultProvider: DEFAULT_PROVIDER,
-        defaultModel: DEFAULT_MODEL,
-      });
       const providerForCard = resolved.entry.providerOverride?.trim() || configured.provider;
-      const authStore = ensureAuthProfileStore(agentDir, { allowKeychainPrompt: false });
-      const authHealth = buildAuthHealthSummary({
-        store: authStore,
-        cfg,
-      });
-      const oauthProfiles = authHealth.profiles.filter(
-        (profile) => profile.type === "oauth" || profile.type === "token",
-      );
-
-      const usageProviders = Array.from(
-        new Set(
-          oauthProfiles
-            .map((profile) => resolveUsageProviderId(profile.provider))
-            .filter((provider): provider is UsageProviderId => Boolean(provider)),
-        ),
-      );
-      const usageByProvider = new Map<string, string>();
-      if (usageProviders.length > 0) {
+      const usageProvider = resolveUsageProviderId(providerForCard);
+      let usageLine: string | undefined;
+      if (usageProvider) {
         try {
           const usageSummary = await loadProviderUsageSummary({
             timeoutMs: 3500,
-            providers: usageProviders,
+            providers: [usageProvider],
             agentDir,
           });
-          for (const snapshot of usageSummary.providers) {
+          const snapshot = usageSummary.providers.find((entry) => entry.provider === usageProvider);
+          if (snapshot) {
             const formatted = formatUsageWindowSummary(snapshot, {
               now: Date.now(),
               maxWindows: 2,
+              includeResets: true,
             });
-            if (formatted) usageByProvider.set(snapshot.provider, formatted);
+            if (formatted && !formatted.startsWith("error:")) {
+              usageLine = `📊 Usage: ${formatted}`;
+            }
           }
         } catch {
           // ignore
         }
       }
 
-      const usageProvider = resolveUsageProviderId(providerForCard);
-      const usageLine =
-        oauthProfiles.length === 0 && usageProvider && usageByProvider.has(usageProvider)
-          ? `📊 Usage: ${usageByProvider.get(usageProvider)}`
-          : undefined;
-
       const isGroup =
         resolved.entry.chatType === "group" ||
-        resolved.entry.chatType === "room" ||
-        resolved.key.startsWith("group:") ||
+        resolved.entry.chatType === "channel" ||
         resolved.key.includes(":group:") ||
         resolved.key.includes(":channel:");
       const groupActivation = isGroup
@@ -346,9 +324,18 @@ export function createSessionStatusTool(opts?: {
         resolved.entry.queueDebounceMs ?? resolved.entry.queueCap ?? resolved.entry.queueDrop,
       );
 
+      const agentDefaults = cfg.agents?.defaults ?? {};
+      const defaultLabel = `${configured.provider}/${configured.model}`;
+      const agentModel =
+        typeof agentDefaults.model === "object" && agentDefaults.model
+          ? { ...agentDefaults.model, primary: defaultLabel }
+          : { primary: defaultLabel };
       const statusText = buildStatusMessage({
         config: cfg,
-        agent: cfg.agents?.defaults ?? {},
+        agent: {
+          ...agentDefaults,
+          model: agentModel,
+        },
         sessionEntry: resolved.entry,
         sessionKey: resolved.key,
         groupActivation,
@@ -370,53 +357,13 @@ export function createSessionStatusTool(opts?: {
         includeTranscriptUsage: false,
       });
 
-      const authStatusLines = (() => {
-        if (oauthProfiles.length === 0) return [];
-        const formatStatus = (status: string) => {
-          if (status === "ok") return "ok";
-          if (status === "static") return "static";
-          if (status === "expiring") return "expiring";
-          if (status === "missing") return "unknown";
-          return "expired";
-        };
-        const profilesByProvider = new Map<string, typeof oauthProfiles>();
-        for (const profile of oauthProfiles) {
-          const current = profilesByProvider.get(profile.provider);
-          if (current) current.push(profile);
-          else profilesByProvider.set(profile.provider, [profile]);
-        }
-        const lines: string[] = ["OAuth/token status"];
-        for (const [provider, profiles] of profilesByProvider) {
-          const usageKey = resolveUsageProviderId(provider);
-          const usage = usageKey ? usageByProvider.get(usageKey) : undefined;
-          const usageSuffix = usage ? ` — usage: ${usage}` : "";
-          lines.push(`- ${provider}${usageSuffix}`);
-          for (const profile of profiles) {
-            const labelText = profile.label || profile.profileId;
-            const status = formatStatus(profile.status);
-            const expiry =
-              profile.status === "static"
-                ? ""
-                : profile.expiresAt
-                  ? ` expires in ${formatRemainingShort(profile.remainingMs)}`
-                  : " expires unknown";
-            const source = profile.source !== "store" ? ` (${profile.source})` : "";
-            lines.push(`  - ${labelText} ${status}${expiry}${source}`);
-          }
-        }
-        return lines;
-      })();
-
-      const fullStatusText =
-        authStatusLines.length > 0 ? `${statusText}\n\n${authStatusLines.join("\n")}` : statusText;
-
       return {
-        content: [{ type: "text", text: fullStatusText }],
+        content: [{ type: "text", text: statusText }],
         details: {
           ok: true,
           sessionKey: resolved.key,
           changedModel,
-          statusText: fullStatusText,
+          statusText,
         },
       };
     },

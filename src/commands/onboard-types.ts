@@ -12,12 +12,15 @@ export type AuthChoice =
   | "openai-codex"
   | "openai-api-key"
   | "openrouter-api-key"
+  | "ai-gateway-api-key"
   | "moonshot-api-key"
+  | "kimi-code-api-key"
   | "synthetic-api-key"
   | "codex-cli"
-  | "antigravity"
   | "apiKey"
   | "gemini-api-key"
+  | "google-antigravity"
+  | "google-gemini-cli"
   | "zai-api-key"
   | "minimax-cloud"
   | "minimax"
@@ -25,6 +28,8 @@ export type AuthChoice =
   | "minimax-api-lightning"
   | "opencode-zen"
   | "github-copilot"
+  | "copilot-proxy"
+  | "qwen-portal"
   | "skip";
 export type GatewayAuthChoice = "off" | "token" | "password";
 export type ResetScope = "config" | "config+creds+sessions" | "full";
@@ -55,7 +60,9 @@ export type OnboardOptions = {
   anthropicApiKey?: string;
   openaiApiKey?: string;
   openrouterApiKey?: string;
+  aiGatewayApiKey?: string;
   moonshotApiKey?: string;
+  kimiCodeApiKey?: string;
   geminiApiKey?: string;
   zaiApiKey?: string;
   minimaxApiKey?: string;

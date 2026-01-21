@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
+import type { ChannelPlugin } from "../channels/plugins/types.js";
+import type { PluginRegistry } from "../plugins/registry.js";
 import {
   agentCommand,
   connectOk,
@@ -9,9 +11,37 @@ import {
   rpcReq,
   startServerWithClient,
   testState,
+  writeSessionStore,
 } from "./test-helpers.js";
 
 installGatewayTestHooks();
+
+const registryState = vi.hoisted(() => ({
+  registry: {
+    plugins: [],
+    tools: [],
+    channels: [],
+    providers: [],
+    gatewayHandlers: {},
+    httpHandlers: [],
+    cliRegistrars: [],
+    services: [],
+    diagnostics: [],
+  } as PluginRegistry,
+}));
+
+vi.mock("./server-plugins.js", async () => {
+  const { setActivePluginRegistry } = await import("../plugins/runtime.js");
+  return {
+    loadGatewayPlugins: (params: { baseMethods: string[] }) => {
+      setActivePluginRegistry(registryState.registry);
+      return {
+        pluginRegistry: registryState.registry,
+        gatewayMethods: params.baseMethods ?? [],
+      };
+    },
+  };
+});
 
 const BASE_IMAGE_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X3mIAAAAASUVORK5CYII=";
@@ -19,29 +49,113 @@ const BASE_IMAGE_PNG =
 function expectChannels(call: Record<string, unknown>, channel: string) {
   expect(call.channel).toBe(channel);
   expect(call.messageChannel).toBe(channel);
+  const runContext = call.runContext as { messageChannel?: string } | undefined;
+  expect(runContext?.messageChannel).toBe(channel);
 }
+
+const createRegistry = (channels: PluginRegistry["channels"]): PluginRegistry => ({
+  plugins: [],
+  tools: [],
+  channels,
+  providers: [],
+  gatewayHandlers: {},
+  httpHandlers: [],
+  cliRegistrars: [],
+  services: [],
+  diagnostics: [],
+});
+
+const createStubChannelPlugin = (params: {
+  id: ChannelPlugin["id"];
+  label: string;
+  resolveAllowFrom?: (cfg: Record<string, unknown>) => string[];
+}): ChannelPlugin => ({
+  id: params.id,
+  meta: {
+    id: params.id,
+    label: params.label,
+    selectionLabel: params.label,
+    docsPath: `/channels/${params.id}`,
+    blurb: "test stub.",
+  },
+  capabilities: { chatTypes: ["direct"] },
+  config: {
+    listAccountIds: () => ["default"],
+    resolveAccount: () => ({}),
+    resolveAllowFrom: params.resolveAllowFrom
+      ? ({ cfg }) => params.resolveAllowFrom?.(cfg as Record<string, unknown>) ?? []
+      : undefined,
+  },
+  outbound: {
+    deliveryMode: "direct",
+    resolveTarget: ({ to, allowFrom }) => {
+      const trimmed = to?.trim() ?? "";
+      if (trimmed) return { ok: true, to: trimmed };
+      const first = allowFrom?.[0];
+      if (first) return { ok: true, to: String(first) };
+      return {
+        ok: false,
+        error: new Error(`missing target for ${params.id}`),
+      };
+    },
+    sendText: async () => ({ channel: params.id, messageId: "msg-test" }),
+    sendMedia: async () => ({ channel: params.id, messageId: "msg-test" }),
+  },
+});
+
+const defaultRegistry = createRegistry([
+  {
+    pluginId: "whatsapp",
+    source: "test",
+    plugin: createStubChannelPlugin({
+      id: "whatsapp",
+      label: "WhatsApp",
+      resolveAllowFrom: (cfg) => {
+        const channels = cfg.channels as Record<string, unknown> | undefined;
+        const entry = channels?.whatsapp as Record<string, unknown> | undefined;
+        const allow = entry?.allowFrom;
+        return Array.isArray(allow) ? allow.map((value) => String(value)) : [];
+      },
+    }),
+  },
+  {
+    pluginId: "telegram",
+    source: "test",
+    plugin: createStubChannelPlugin({ id: "telegram", label: "Telegram" }),
+  },
+  {
+    pluginId: "discord",
+    source: "test",
+    plugin: createStubChannelPlugin({ id: "discord", label: "Discord" }),
+  },
+  {
+    pluginId: "slack",
+    source: "test",
+    plugin: createStubChannelPlugin({ id: "slack", label: "Slack" }),
+  },
+  {
+    pluginId: "signal",
+    source: "test",
+    plugin: createStubChannelPlugin({ id: "signal", label: "Signal" }),
+  },
+]);
 
 describe("gateway server agent", () => {
   test("agent marks implicit delivery when lastTo is stale", async () => {
+    registryState.registry = defaultRegistry;
     testState.allowFrom = ["+436769770569"];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main-stale",
-            updatedAt: Date.now(),
-            lastChannel: "whatsapp",
-            lastTo: "+1555",
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-stale",
+          updatedAt: Date.now(),
+          lastChannel: "whatsapp",
+          lastTo: "+1555",
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -68,22 +182,17 @@ describe("gateway server agent", () => {
   });
 
   test("agent forwards sessionKey to agentCommand", async () => {
+    registryState.registry = defaultRegistry;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          "agent:main:subagent:abc": {
-            sessionId: "sess-sub",
-            updatedAt: Date.now(),
-          },
+    await writeSessionStore({
+      entries: {
+        "agent:main:subagent:abc": {
+          sessionId: "sess-sub",
+          updatedAt: Date.now(),
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -107,23 +216,257 @@ describe("gateway server agent", () => {
     await server.close();
   });
 
-  test("agent forwards image attachments as images[]", async () => {
+  test("agent derives sessionKey from agentId", async () => {
+    registryState.registry = defaultRegistry;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main-images",
-            updatedAt: Date.now(),
-          },
+    testState.agentsConfig = { list: [{ id: "ops" }] };
+    await writeSessionStore({
+      agentId: "ops",
+      entries: {
+        main: {
+          sessionId: "sess-ops",
+          updatedAt: Date.now(),
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
+
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq(ws, "agent", {
+      message: "hi",
+      agentId: "ops",
+      idempotencyKey: "idem-agent-id",
+    });
+    expect(res.ok).toBe(true);
+
+    const spy = vi.mocked(agentCommand);
+    const call = spy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.sessionKey).toBe("agent:ops:main");
+    expect(call.sessionId).toBe("sess-ops");
+
+    ws.close();
+    await server.close();
+  });
+
+  test("agent rejects unknown reply channel", async () => {
+    registryState.registry = defaultRegistry;
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq(ws, "agent", {
+      message: "hi",
+      replyChannel: "unknown-channel",
+      idempotencyKey: "idem-agent-reply-unknown",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.error?.message).toContain("unknown channel");
+
+    const spy = vi.mocked(agentCommand);
+    expect(spy).not.toHaveBeenCalled();
+
+    ws.close();
+    await server.close();
+  });
+
+  test("agent rejects mismatched agentId and sessionKey", async () => {
+    registryState.registry = defaultRegistry;
+    testState.agentsConfig = { list: [{ id: "ops" }] };
+
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq(ws, "agent", {
+      message: "hi",
+      agentId: "ops",
+      sessionKey: "agent:main:main",
+      idempotencyKey: "idem-agent-mismatch",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.error?.message).toContain("does not match session key agent");
+
+    const spy = vi.mocked(agentCommand);
+    expect(spy).not.toHaveBeenCalled();
+
+    ws.close();
+    await server.close();
+  });
+
+  test("agent forwards accountId to agentCommand", async () => {
+    registryState.registry = defaultRegistry;
+    testState.allowFrom = ["+1555"];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    testState.sessionStorePath = path.join(dir, "sessions.json");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-account",
+          updatedAt: Date.now(),
+          lastChannel: "whatsapp",
+          lastTo: "+1555",
+          lastAccountId: "default",
+        },
+      },
+    });
+
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq(ws, "agent", {
+      message: "hi",
+      sessionKey: "main",
+      deliver: true,
+      accountId: "kev",
+      idempotencyKey: "idem-agent-account",
+    });
+    expect(res.ok).toBe(true);
+
+    const spy = vi.mocked(agentCommand);
+    const call = spy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expectChannels(call, "whatsapp");
+    expect(call.to).toBe("+1555");
+    expect(call.accountId).toBe("kev");
+    const runContext = call.runContext as { accountId?: string } | undefined;
+    expect(runContext?.accountId).toBe("kev");
+
+    ws.close();
+    await server.close();
+    testState.allowFrom = undefined;
+  });
+
+  test("agent avoids lastAccountId when explicit to is provided", async () => {
+    registryState.registry = defaultRegistry;
+    testState.allowFrom = ["+1555"];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    testState.sessionStorePath = path.join(dir, "sessions.json");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-explicit",
+          updatedAt: Date.now(),
+          lastChannel: "whatsapp",
+          lastTo: "+1555",
+          lastAccountId: "legacy",
+        },
+      },
+    });
+
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq(ws, "agent", {
+      message: "hi",
+      sessionKey: "main",
+      deliver: true,
+      to: "+1666",
+      idempotencyKey: "idem-agent-explicit",
+    });
+    expect(res.ok).toBe(true);
+
+    const spy = vi.mocked(agentCommand);
+    const call = spy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expectChannels(call, "whatsapp");
+    expect(call.to).toBe("+1666");
+    expect(call.accountId).toBeUndefined();
+
+    ws.close();
+    await server.close();
+    testState.allowFrom = undefined;
+  });
+
+  test("agent keeps explicit accountId when explicit to is provided", async () => {
+    registryState.registry = defaultRegistry;
+    testState.allowFrom = ["+1555"];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    testState.sessionStorePath = path.join(dir, "sessions.json");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-explicit-account",
+          updatedAt: Date.now(),
+          lastChannel: "whatsapp",
+          lastTo: "+1555",
+          lastAccountId: "legacy",
+        },
+      },
+    });
+
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq(ws, "agent", {
+      message: "hi",
+      sessionKey: "main",
+      deliver: true,
+      to: "+1666",
+      accountId: "primary",
+      idempotencyKey: "idem-agent-explicit-account",
+    });
+    expect(res.ok).toBe(true);
+
+    const spy = vi.mocked(agentCommand);
+    const call = spy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expectChannels(call, "whatsapp");
+    expect(call.to).toBe("+1666");
+    expect(call.accountId).toBe("primary");
+
+    ws.close();
+    await server.close();
+    testState.allowFrom = undefined;
+  });
+
+  test("agent falls back to lastAccountId for implicit delivery", async () => {
+    registryState.registry = defaultRegistry;
+    testState.allowFrom = ["+1555"];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    testState.sessionStorePath = path.join(dir, "sessions.json");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-implicit",
+          updatedAt: Date.now(),
+          lastChannel: "whatsapp",
+          lastTo: "+1555",
+          lastAccountId: "kev",
+        },
+      },
+    });
+
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq(ws, "agent", {
+      message: "hi",
+      sessionKey: "main",
+      deliver: true,
+      idempotencyKey: "idem-agent-implicit-account",
+    });
+    expect(res.ok).toBe(true);
+
+    const spy = vi.mocked(agentCommand);
+    const call = spy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expectChannels(call, "whatsapp");
+    expect(call.to).toBe("+1555");
+    expect(call.accountId).toBe("kev");
+
+    ws.close();
+    await server.close();
+    testState.allowFrom = undefined;
+  });
+
+  test("agent forwards image attachments as images[]", async () => {
+    registryState.registry = defaultRegistry;
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    testState.sessionStorePath = path.join(dir, "sessions.json");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-images",
+          updatedAt: Date.now(),
+        },
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -160,23 +503,18 @@ describe("gateway server agent", () => {
   });
 
   test("agent falls back to whatsapp when delivery requested and no last channel exists", async () => {
+    registryState.registry = defaultRegistry;
     testState.allowFrom = ["+1555"];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main-missing-provider",
-            updatedAt: Date.now(),
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-missing-provider",
+          updatedAt: Date.now(),
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -202,24 +540,19 @@ describe("gateway server agent", () => {
   });
 
   test("agent routes main last-channel whatsapp", async () => {
+    registryState.registry = defaultRegistry;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main-whatsapp",
-            updatedAt: Date.now(),
-            lastChannel: "whatsapp",
-            lastTo: "+1555",
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-whatsapp",
+          updatedAt: Date.now(),
+          lastChannel: "whatsapp",
+          lastTo: "+1555",
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -247,24 +580,19 @@ describe("gateway server agent", () => {
   });
 
   test("agent routes main last-channel telegram", async () => {
+    registryState.registry = defaultRegistry;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main",
-            updatedAt: Date.now(),
-            lastChannel: "telegram",
-            lastTo: "123",
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          updatedAt: Date.now(),
+          lastChannel: "telegram",
+          lastTo: "123",
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -291,24 +619,19 @@ describe("gateway server agent", () => {
   });
 
   test("agent routes main last-channel discord", async () => {
+    registryState.registry = defaultRegistry;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-discord",
-            updatedAt: Date.now(),
-            lastChannel: "discord",
-            lastTo: "channel:discord-123",
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-discord",
+          updatedAt: Date.now(),
+          lastChannel: "discord",
+          lastTo: "channel:discord-123",
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -335,24 +658,19 @@ describe("gateway server agent", () => {
   });
 
   test("agent routes main last-channel slack", async () => {
+    registryState.registry = defaultRegistry;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-slack",
-            updatedAt: Date.now(),
-            lastChannel: "slack",
-            lastTo: "channel:slack-123",
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-slack",
+          updatedAt: Date.now(),
+          lastChannel: "slack",
+          lastTo: "channel:slack-123",
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -379,24 +697,19 @@ describe("gateway server agent", () => {
   });
 
   test("agent routes main last-channel signal", async () => {
+    registryState.registry = defaultRegistry;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-signal",
-            updatedAt: Date.now(),
-            lastChannel: "signal",
-            lastTo: "+15551234567",
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-signal",
+          updatedAt: Date.now(),
+          lastChannel: "signal",
+          lastTo: "+15551234567",
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);

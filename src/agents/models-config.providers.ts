@@ -4,7 +4,7 @@ import {
   resolveCopilotApiToken,
 } from "../providers/github-copilot-token.js";
 import { ensureAuthProfileStore, listProfilesForProvider } from "./auth-profiles.js";
-import { resolveEnvApiKey } from "./model-auth.js";
+import { resolveAwsSdkEnvVarName, resolveEnvApiKey } from "./model-auth.js";
 import {
   buildSyntheticModelDefinition,
   SYNTHETIC_BASE_URL,
@@ -37,6 +37,29 @@ const MOONSHOT_DEFAULT_COST = {
   cacheRead: 0,
   cacheWrite: 0,
 };
+const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
+const KIMI_CODE_MODEL_ID = "kimi-for-coding";
+const KIMI_CODE_CONTEXT_WINDOW = 262144;
+const KIMI_CODE_MAX_TOKENS = 32768;
+const KIMI_CODE_HEADERS = { "User-Agent": "KimiCLI/0.77" } as const;
+const KIMI_CODE_COMPAT = { supportsDeveloperRole: false } as const;
+const KIMI_CODE_DEFAULT_COST = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
+
+const QWEN_PORTAL_BASE_URL = "https://portal.qwen.ai/v1";
+const QWEN_PORTAL_OAUTH_PLACEHOLDER = "qwen-oauth";
+const QWEN_PORTAL_DEFAULT_CONTEXT_WINDOW = 128000;
+const QWEN_PORTAL_DEFAULT_MAX_TOKENS = 8192;
+const QWEN_PORTAL_DEFAULT_COST = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
 
 function normalizeApiKeyConfig(value: string): string {
   const trimmed = value.trim();
@@ -49,6 +72,10 @@ function resolveEnvApiKeyVarName(provider: string): string | undefined {
   if (!resolved) return undefined;
   const match = /^(?:env: |shell env: )([A-Z0-9_]+)$/.exec(resolved.source);
   return match ? match[1] : undefined;
+}
+
+function resolveAwsSdkApiKeyVarName(): string {
+  return resolveAwsSdkEnvVarName() ?? "AWS_PROFILE";
 }
 
 function resolveApiKeyFromProfiles(params: {
@@ -115,15 +142,23 @@ export function normalizeProviders(params: {
     const hasModels =
       Array.isArray(normalizedProvider.models) && normalizedProvider.models.length > 0;
     if (hasModels && !normalizedProvider.apiKey?.trim()) {
-      const fromEnv = resolveEnvApiKeyVarName(normalizedKey);
-      const fromProfiles = resolveApiKeyFromProfiles({
-        provider: normalizedKey,
-        store: authStore,
-      });
-      const apiKey = fromEnv ?? fromProfiles;
-      if (apiKey?.trim()) {
+      const authMode =
+        normalizedProvider.auth ?? (normalizedKey === "amazon-bedrock" ? "aws-sdk" : undefined);
+      if (authMode === "aws-sdk") {
+        const apiKey = resolveAwsSdkApiKeyVarName();
         mutated = true;
         normalizedProvider = { ...normalizedProvider, apiKey };
+      } else {
+        const fromEnv = resolveEnvApiKeyVarName(normalizedKey);
+        const fromProfiles = resolveApiKeyFromProfiles({
+          provider: normalizedKey,
+          store: authStore,
+        });
+        const apiKey = fromEnv ?? fromProfiles;
+        if (apiKey?.trim()) {
+          mutated = true;
+          normalizedProvider = { ...normalizedProvider, apiKey };
+        }
       }
     }
 
@@ -184,6 +219,53 @@ function buildMoonshotProvider(): ProviderConfig {
   };
 }
 
+function buildKimiCodeProvider(): ProviderConfig {
+  return {
+    baseUrl: KIMI_CODE_BASE_URL,
+    api: "openai-completions",
+    models: [
+      {
+        id: KIMI_CODE_MODEL_ID,
+        name: "Kimi For Coding",
+        reasoning: true,
+        input: ["text"],
+        cost: KIMI_CODE_DEFAULT_COST,
+        contextWindow: KIMI_CODE_CONTEXT_WINDOW,
+        maxTokens: KIMI_CODE_MAX_TOKENS,
+        headers: KIMI_CODE_HEADERS,
+        compat: KIMI_CODE_COMPAT,
+      },
+    ],
+  };
+}
+
+function buildQwenPortalProvider(): ProviderConfig {
+  return {
+    baseUrl: QWEN_PORTAL_BASE_URL,
+    api: "openai-completions",
+    models: [
+      {
+        id: "coder-model",
+        name: "Qwen Coder",
+        reasoning: false,
+        input: ["text"],
+        cost: QWEN_PORTAL_DEFAULT_COST,
+        contextWindow: QWEN_PORTAL_DEFAULT_CONTEXT_WINDOW,
+        maxTokens: QWEN_PORTAL_DEFAULT_MAX_TOKENS,
+      },
+      {
+        id: "vision-model",
+        name: "Qwen Vision",
+        reasoning: false,
+        input: ["text", "image"],
+        cost: QWEN_PORTAL_DEFAULT_COST,
+        contextWindow: QWEN_PORTAL_DEFAULT_CONTEXT_WINDOW,
+        maxTokens: QWEN_PORTAL_DEFAULT_MAX_TOKENS,
+      },
+    ],
+  };
+}
+
 function buildSyntheticProvider(): ProviderConfig {
   return {
     baseUrl: SYNTHETIC_BASE_URL,
@@ -212,11 +294,26 @@ export function resolveImplicitProviders(params: { agentDir: string }): ModelsCo
     providers.moonshot = { ...buildMoonshotProvider(), apiKey: moonshotKey };
   }
 
+  const kimiCodeKey =
+    resolveEnvApiKeyVarName("kimi-code") ??
+    resolveApiKeyFromProfiles({ provider: "kimi-code", store: authStore });
+  if (kimiCodeKey) {
+    providers["kimi-code"] = { ...buildKimiCodeProvider(), apiKey: kimiCodeKey };
+  }
+
   const syntheticKey =
     resolveEnvApiKeyVarName("synthetic") ??
     resolveApiKeyFromProfiles({ provider: "synthetic", store: authStore });
   if (syntheticKey) {
     providers.synthetic = { ...buildSyntheticProvider(), apiKey: syntheticKey };
+  }
+
+  const qwenProfiles = listProfilesForProvider(authStore, "qwen-portal");
+  if (qwenProfiles.length > 0) {
+    providers["qwen-portal"] = {
+      ...buildQwenPortalProvider(),
+      apiKey: QWEN_PORTAL_OAUTH_PLACEHOLDER,
+    };
   }
 
   return providers;
@@ -227,7 +324,7 @@ export async function resolveImplicitCopilotProvider(params: {
   env?: NodeJS.ProcessEnv;
 }): Promise<ProviderConfig | null> {
   const env = params.env ?? process.env;
-  const authStore = ensureAuthProfileStore(params.agentDir);
+  const authStore = ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false });
   const hasProfile = listProfilesForProvider(authStore, "github-copilot").length > 0;
   const envToken = env.COPILOT_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN;
   const githubToken = (envToken ?? "").trim();

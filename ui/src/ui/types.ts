@@ -2,10 +2,22 @@ export type ChannelsStatusSnapshot = {
   ts: number;
   channelOrder: string[];
   channelLabels: Record<string, string>;
+  channelDetailLabels?: Record<string, string>;
+  channelSystemImages?: Record<string, string>;
+  channelMeta?: ChannelUiMetaEntry[];
   channels: Record<string, unknown>;
   channelAccounts: Record<string, ChannelAccountSnapshot[]>;
   channelDefaultAccountId: Record<string, string>;
 };
+
+export type ChannelUiMetaEntry = {
+  id: string;
+  label: string;
+  detailLabel: string;
+  systemImage?: string;
+};
+
+export const CRON_CHANNEL_LAST = "last";
 
 export type ChannelAccountSnapshot = {
   accountId: string;
@@ -188,6 +200,27 @@ export type IMessageStatus = {
   lastProbeAt?: number | null;
 };
 
+export type NostrProfile = {
+  name?: string | null;
+  displayName?: string | null;
+  about?: string | null;
+  picture?: string | null;
+  banner?: string | null;
+  website?: string | null;
+  nip05?: string | null;
+  lud16?: string | null;
+};
+
+export type NostrStatus = {
+  configured: boolean;
+  publicKey?: string | null;
+  running: boolean;
+  lastStartAt?: number | null;
+  lastStopAt?: number | null;
+  lastError?: string | null;
+  profile?: NostrProfile | null;
+};
+
 export type MSTeamsProbe = {
   ok: boolean;
   error?: string | null;
@@ -282,6 +315,7 @@ export type GatewaySessionRow = {
   outputTokens?: number;
   totalTokens?: number;
   model?: string;
+  modelProvider?: string;
   contextTokens?: number;
 };
 

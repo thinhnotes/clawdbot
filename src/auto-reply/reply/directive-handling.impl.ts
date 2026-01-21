@@ -1,10 +1,16 @@
-import { resolveAgentDir, resolveSessionAgentId } from "../../agents/agent-scope.js";
+import {
+  resolveAgentConfig,
+  resolveAgentDir,
+  resolveSessionAgentId,
+} from "../../agents/agent-scope.js";
 import type { ModelAliasIndex } from "../../agents/model-selection.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { type SessionEntry, updateSessionStore } from "../../config/sessions.js";
+import type { ExecAsk, ExecHost, ExecSecurity } from "../../infra/exec-approvals.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { applyVerboseOverride } from "../../sessions/level-overrides.js";
+import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import { formatThinkingLevels, formatXHighModelHint, supportsXHighThinking } from "../thinking.js";
 import type { ReplyPayload } from "../types.js";
 import {
@@ -22,6 +28,36 @@ import {
   withOptions,
 } from "./directive-handling.shared.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "./directives.js";
+
+function resolveExecDefaults(params: {
+  cfg: ClawdbotConfig;
+  sessionEntry?: SessionEntry;
+  agentId?: string;
+}): { host: ExecHost; security: ExecSecurity; ask: ExecAsk; node?: string } {
+  const globalExec = params.cfg.tools?.exec;
+  const agentExec = params.agentId
+    ? resolveAgentConfig(params.cfg, params.agentId)?.tools?.exec
+    : undefined;
+  return {
+    host:
+      (params.sessionEntry?.execHost as ExecHost | undefined) ??
+      (agentExec?.host as ExecHost | undefined) ??
+      (globalExec?.host as ExecHost | undefined) ??
+      "sandbox",
+    security:
+      (params.sessionEntry?.execSecurity as ExecSecurity | undefined) ??
+      (agentExec?.security as ExecSecurity | undefined) ??
+      (globalExec?.security as ExecSecurity | undefined) ??
+      "deny",
+    ask:
+      (params.sessionEntry?.execAsk as ExecAsk | undefined) ??
+      (agentExec?.ask as ExecAsk | undefined) ??
+      (globalExec?.ask as ExecAsk | undefined) ??
+      "on-miss",
+    node:
+      (params.sessionEntry?.execNode as string | undefined) ?? agentExec?.node ?? globalExec?.node,
+  };
+}
 
 export async function handleDirectiveOnly(params: {
   cfg: ClawdbotConfig;
@@ -137,11 +173,11 @@ export async function handleDirectiveOnly(params: {
     if (!directives.rawVerboseLevel) {
       const level = currentVerboseLevel ?? "off";
       return {
-        text: withOptions(`Current verbose level: ${level}.`, "on, off"),
+        text: withOptions(`Current verbose level: ${level}.`, "on, full, off"),
       };
     }
     return {
-      text: `Unrecognized verbose level "${directives.rawVerboseLevel}". Valid levels: off, on.`,
+      text: `Unrecognized verbose level "${directives.rawVerboseLevel}". Valid levels: off, on, full.`,
     };
   }
   if (directives.hasReasoningDirective && !directives.reasoningLevel) {
@@ -188,6 +224,42 @@ export async function handleDirectiveOnly(params: {
         sessionKey: params.sessionKey,
       }),
     };
+  }
+  if (directives.hasExecDirective) {
+    if (directives.invalidExecHost) {
+      return {
+        text: `Unrecognized exec host "${directives.rawExecHost ?? ""}". Valid hosts: sandbox, gateway, node.`,
+      };
+    }
+    if (directives.invalidExecSecurity) {
+      return {
+        text: `Unrecognized exec security "${directives.rawExecSecurity ?? ""}". Valid: deny, allowlist, full.`,
+      };
+    }
+    if (directives.invalidExecAsk) {
+      return {
+        text: `Unrecognized exec ask "${directives.rawExecAsk ?? ""}". Valid: off, on-miss, always.`,
+      };
+    }
+    if (directives.invalidExecNode) {
+      return {
+        text: "Exec node requires a value.",
+      };
+    }
+    if (!directives.hasExecOptions) {
+      const execDefaults = resolveExecDefaults({
+        cfg: params.cfg,
+        sessionEntry,
+        agentId: activeAgentId,
+      });
+      const nodeLabel = execDefaults.node ? `node=${execDefaults.node}` : "node=(unset)";
+      return {
+        text: withOptions(
+          `Current exec defaults: host=${execDefaults.host}, security=${execDefaults.security}, ask=${execDefaults.ask}, ${nodeLabel}.`,
+          "host=sandbox|gateway|node, security=deny|allowlist|full, ask=off|on-miss|always, node=<id>",
+        ),
+      };
+    }
   }
 
   const queueAck = maybeHandleQueueDirective({
@@ -254,23 +326,26 @@ export async function handleDirectiveOnly(params: {
         elevatedChanged ||
         (directives.elevatedLevel !== prevElevatedLevel && directives.elevatedLevel !== undefined);
     }
+    if (directives.hasExecDirective && directives.hasExecOptions) {
+      if (directives.execHost) {
+        sessionEntry.execHost = directives.execHost;
+      }
+      if (directives.execSecurity) {
+        sessionEntry.execSecurity = directives.execSecurity;
+      }
+      if (directives.execAsk) {
+        sessionEntry.execAsk = directives.execAsk;
+      }
+      if (directives.execNode) {
+        sessionEntry.execNode = directives.execNode;
+      }
+    }
     if (modelSelection) {
-      if (modelSelection.isDefault) {
-        delete sessionEntry.providerOverride;
-        delete sessionEntry.modelOverride;
-      } else {
-        sessionEntry.providerOverride = modelSelection.provider;
-        sessionEntry.modelOverride = modelSelection.model;
-      }
-      if (profileOverride) {
-        sessionEntry.authProfileOverride = profileOverride;
-        sessionEntry.authProfileOverrideSource = "user";
-        delete sessionEntry.authProfileOverrideCompactionCount;
-      } else if (directives.hasModelDirective) {
-        delete sessionEntry.authProfileOverride;
-        delete sessionEntry.authProfileOverrideSource;
-        delete sessionEntry.authProfileOverrideCompactionCount;
-      }
+      applyModelOverrideToSessionEntry({
+        entry: sessionEntry,
+        selection: modelSelection,
+        profileOverride,
+      });
     }
     if (directives.hasQueueDirective && directives.queueReset) {
       delete sessionEntry.queueMode;
@@ -333,7 +408,9 @@ export async function handleDirectiveOnly(params: {
     parts.push(
       directives.verboseLevel === "off"
         ? formatDirectiveAck("Verbose logging disabled.")
-        : formatDirectiveAck("Verbose logging enabled."),
+        : directives.verboseLevel === "full"
+          ? formatDirectiveAck("Verbose logging set to full.")
+          : formatDirectiveAck("Verbose logging enabled."),
     );
   }
   if (directives.hasReasoningDirective && directives.reasoningLevel) {
@@ -352,6 +429,16 @@ export async function handleDirectiveOnly(params: {
         : formatDirectiveAck("Elevated mode enabled."),
     );
     if (shouldHintDirectRuntime) parts.push(formatElevatedRuntimeHint());
+  }
+  if (directives.hasExecDirective && directives.hasExecOptions) {
+    const execParts: string[] = [];
+    if (directives.execHost) execParts.push(`host=${directives.execHost}`);
+    if (directives.execSecurity) execParts.push(`security=${directives.execSecurity}`);
+    if (directives.execAsk) execParts.push(`ask=${directives.execAsk}`);
+    if (directives.execNode) execParts.push(`node=${directives.execNode}`);
+    if (execParts.length > 0) {
+      parts.push(formatDirectiveAck(`Exec defaults set (${execParts.join(", ")}).`));
+    }
   }
   if (shouldDowngradeXHigh) {
     parts.push(

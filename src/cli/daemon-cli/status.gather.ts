@@ -4,7 +4,7 @@ import {
   resolveGatewayPort,
   resolveStateDir,
 } from "../../config/config.js";
-import type { BridgeBindMode, GatewayControlUiConfig } from "../../config/types.js";
+import type { GatewayBindMode, GatewayControlUiConfig } from "../../config/types.js";
 import { readLastGatewayErrorLine } from "../../daemon/diagnostics.js";
 import type { FindExtraGatewayServicesOptions } from "../../daemon/inspect.js";
 import { findExtraGatewayServices } from "../../daemon/inspect.js";
@@ -33,7 +33,7 @@ type ConfigSummary = {
 };
 
 type GatewayStatusSummary = {
-  bindMode: BridgeBindMode;
+  bindMode: GatewayBindMode;
   bindHost: string;
   customBindHost?: string;
   port: number;
@@ -114,7 +114,7 @@ export async function gatherDaemonStatus(
   const [loaded, command, runtime] = await Promise.all([
     service.isLoaded({ env: process.env }).catch(() => false),
     service.readCommand(process.env).catch(() => null),
-    service.readRuntime(process.env).catch(() => undefined),
+    service.readRuntime(process.env).catch((err) => ({ status: "unknown", detail: String(err) })),
   ]);
   const configAudit = await auditGatewayServiceConfig({
     env: process.env,

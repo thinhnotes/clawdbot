@@ -123,8 +123,10 @@ cd clawdbot
 pnpm install
 pnpm ui:build # auto-installs UI deps on first run
 pnpm build
-pnpm clawdbot onboard --install-daemon
+clawdbot onboard --install-daemon
 ```
+
+If you don’t have a global install yet, run the onboarding step via `pnpm clawdbot ...` from the repo.
 
 Multi-instance quickstart (optional):
 
@@ -137,7 +139,7 @@ clawdbot gateway --port 19001
 Send a test message (requires a running Gateway):
 
 ```bash
-clawdbot message send --to +15555550123 --message "Hello from Clawdbot"
+clawdbot message send --target +15555550123 --message "Hello from Clawdbot"
 ```
 
 ## Configuration (optional)
@@ -165,7 +167,7 @@ Example:
 
 - Start here:
   - [Docs hubs (all pages linked)](/start/hubs)
-  - [FAQ](/start/faq) ← *common questions answered*
+  - [Help](/help) ← *common fixes + troubleshooting*
   - [Configuration](/gateway/configuration)
   - [Configuration examples](/gateway/configuration-examples)
   - [Slash commands](/tools/slash-commands)

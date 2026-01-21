@@ -4,9 +4,11 @@ import path from "node:path";
 
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
+import { formatInboundEnvelope, resolveEnvelopeFormatOptions } from "../../auto-reply/envelope.js";
 import { agentCommand } from "../../commands/agent.js";
 import { mergeSessionEntry, updateSessionStore } from "../../config/sessions.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
+import { isAcpSessionKey } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
@@ -33,6 +35,7 @@ import {
   readSessionMessages,
   resolveSessionModelRef,
 } from "../session-utils.js";
+import { stripEnvelopeFromMessages } from "../chat-sanitize.js";
 import { formatForLog } from "../ws-log.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
@@ -62,7 +65,8 @@ export const chatHandlers: GatewayRequestHandlers = {
     const requested = typeof limit === "number" ? limit : defaultLimit;
     const max = Math.min(hardMax, requested);
     const sliced = rawMessages.length > max ? rawMessages.slice(-max) : rawMessages;
-    const capped = capArrayByJsonBytes(sliced, MAX_CHAT_HISTORY_MESSAGES_BYTES).items;
+    const sanitized = stripEnvelopeFromMessages(sliced);
+    const capped = capArrayByJsonBytes(sanitized, MAX_CHAT_HISTORY_MESSAGES_BYTES).items;
     let thinkingLevel = entry?.thinkingLevel;
     if (!thinkingLevel) {
       const configured = cfg.agents?.defaults?.thinkingDefault;
@@ -111,7 +115,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       removeChatRun: context.removeChatRun,
       agentRunSeq: context.agentRunSeq,
       broadcast: context.broadcast,
-      bridgeSendToSession: context.bridgeSendToSession,
+      nodeSendToSession: context.nodeSendToSession,
     };
 
     if (!runId) {
@@ -248,7 +252,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           removeChatRun: context.removeChatRun,
           agentRunSeq: context.agentRunSeq,
           broadcast: context.broadcast,
-          bridgeSendToSession: context.bridgeSendToSession,
+          nodeSendToSession: context.nodeSendToSession,
         },
         { sessionKey: p.sessionKey, stopReason: "stop" },
       );
@@ -299,9 +303,20 @@ export const chatHandlers: GatewayRequestHandlers = {
       };
       respond(true, ackPayload, undefined, { runId: clientRunId });
 
+      const envelopeOptions = resolveEnvelopeFormatOptions(cfg);
+      const envelopedMessage = formatInboundEnvelope({
+        channel: "WebChat",
+        from: p.sessionKey,
+        timestamp: now,
+        body: parsedMessage,
+        chatType: "direct",
+        previousTimestamp: entry?.updatedAt,
+        envelope: envelopeOptions,
+      });
+      const lane = isAcpSessionKey(p.sessionKey) ? p.sessionKey : undefined;
       void agentCommand(
         {
-          message: parsedMessage,
+          message: envelopedMessage,
           images: parsedImages.length > 0 ? parsedImages : undefined,
           sessionId,
           sessionKey: p.sessionKey,
@@ -311,6 +326,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           timeout: Math.ceil(timeoutMs / 1000).toString(),
           messageChannel: INTERNAL_MESSAGE_CHANNEL,
           abortSignal: abortController.signal,
+          lane,
         },
         defaultRuntime,
         context.deps,
@@ -389,7 +405,11 @@ export const chatHandlers: GatewayRequestHandlers = {
       : path.join(path.dirname(storePath), `${sessionId}.jsonl`);
 
     if (!fs.existsSync(transcriptPath)) {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "transcript file not found"));
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "transcript file not found"),
+      );
       return;
     }
 
@@ -416,7 +436,11 @@ export const chatHandlers: GatewayRequestHandlers = {
       fs.appendFileSync(transcriptPath, `${JSON.stringify(transcriptEntry)}\n`, "utf-8");
     } catch (err) {
       const errMessage = err instanceof Error ? err.message : String(err);
-      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, `failed to write transcript: ${errMessage}`));
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.UNAVAILABLE, `failed to write transcript: ${errMessage}`),
+      );
       return;
     }
 
@@ -429,7 +453,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       message: transcriptEntry.message,
     };
     context.broadcast("chat", chatPayload);
-    context.bridgeSendToSession(p.sessionKey, "chat", chatPayload);
+    context.nodeSendToSession(p.sessionKey, "chat", chatPayload);
 
     respond(true, { ok: true, messageId });
   },

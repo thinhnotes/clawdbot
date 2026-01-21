@@ -1,6 +1,9 @@
+import type { NormalizedChatType } from "../channels/chat-type.js";
+
 export type ReplyMode = "text" | "command";
 export type TypingMode = "never" | "instant" | "thinking" | "message";
 export type SessionScope = "per-sender" | "global";
+export type DmScope = "main" | "per-peer" | "per-channel-peer";
 export type ReplyToMode = "off" | "first" | "all";
 export type GroupPolicy = "open" | "disabled" | "allowlist";
 export type DmPolicy = "pairing" | "allowlist" | "open" | "disabled";
@@ -40,7 +43,7 @@ export type HumanDelayConfig = {
 export type SessionSendPolicyAction = "allow" | "deny";
 export type SessionSendPolicyMatch = {
   channel?: string;
-  chatType?: "direct" | "group" | "room";
+  chatType?: NormalizedChatType;
   keyPrefix?: string;
 };
 export type SessionSendPolicyRule = {
@@ -52,11 +55,31 @@ export type SessionSendPolicyConfig = {
   rules?: SessionSendPolicyRule[];
 };
 
+export type SessionResetMode = "daily" | "idle";
+export type SessionResetConfig = {
+  mode?: SessionResetMode;
+  /** Local hour (0-23) for the daily reset boundary. */
+  atHour?: number;
+  /** Sliding idle window (minutes). When set with daily mode, whichever expires first wins. */
+  idleMinutes?: number;
+};
+export type SessionResetByTypeConfig = {
+  dm?: SessionResetConfig;
+  group?: SessionResetConfig;
+  thread?: SessionResetConfig;
+};
+
 export type SessionConfig = {
   scope?: SessionScope;
+  /** DM session scoping (default: "main"). */
+  dmScope?: DmScope;
+  /** Map platform-prefixed identities (e.g. "telegram:123") to canonical DM peers. */
+  identityLinks?: Record<string, string[]>;
   resetTriggers?: string[];
   idleMinutes?: number;
   heartbeatIdleMinutes?: number;
+  reset?: SessionResetConfig;
+  resetByType?: SessionResetByTypeConfig;
   store?: string;
   typingIntervalSeconds?: number;
   typingMode?: TypingMode;
@@ -77,6 +100,26 @@ export type LoggingConfig = {
   redactSensitive?: "off" | "tools";
   /** Regex patterns used to redact sensitive tokens (defaults apply when unset). */
   redactPatterns?: string[];
+};
+
+export type DiagnosticsOtelConfig = {
+  enabled?: boolean;
+  endpoint?: string;
+  protocol?: "http/protobuf" | "grpc";
+  headers?: Record<string, string>;
+  serviceName?: string;
+  traces?: boolean;
+  metrics?: boolean;
+  logs?: boolean;
+  /** Trace sample rate (0.0 - 1.0). */
+  sampleRate?: number;
+  /** Metric export interval (ms). */
+  flushIntervalMs?: number;
+};
+
+export type DiagnosticsConfig = {
+  enabled?: boolean;
+  otel?: DiagnosticsOtelConfig;
 };
 
 export type WebReconnectConfig = {

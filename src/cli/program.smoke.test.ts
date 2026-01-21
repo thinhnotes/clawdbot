@@ -43,6 +43,11 @@ vi.mock("../tui/tui.js", () => ({ runTui }));
 vi.mock("../gateway/call.js", () => ({
   callGateway,
   randomIdempotencyKey: () => "idem-test",
+  buildGatewayConnectionDetails: () => ({
+    url: "ws://127.0.0.1:1234",
+    urlSource: "test",
+    message: "Gateway target: ws://127.0.0.1:1234",
+  }),
 }));
 vi.mock("./deps.js", () => ({ createDefaultDeps: () => ({}) }));
 
@@ -56,7 +61,7 @@ describe("cli program (smoke)", () => {
 
   it("runs message with required options", async () => {
     const program = buildProgram();
-    await program.parseAsync(["message", "send", "--to", "+1", "--message", "hi"], {
+    await program.parseAsync(["message", "send", "--target", "+1", "--message", "hi"], {
       from: "user",
     });
     expect(messageCommand).toHaveBeenCalled();
@@ -66,6 +71,12 @@ describe("cli program (smoke)", () => {
     const program = buildProgram();
     await program.parseAsync(["status"], { from: "user" });
     expect(statusCommand).toHaveBeenCalled();
+  });
+
+  it("registers memory command", () => {
+    const program = buildProgram();
+    const names = program.commands.map((command) => command.name());
+    expect(names).toContain("memory");
   });
 
   it("runs tui without overriding timeout", async () => {
@@ -175,6 +186,29 @@ describe("cli program (smoke)", () => {
         nonInteractive: true,
         authChoice: "moonshot-api-key",
         moonshotApiKey: "sk-moonshot-test",
+      }),
+      runtime,
+    );
+  });
+
+  it("passes kimi code api key to onboard", async () => {
+    const program = buildProgram();
+    await program.parseAsync(
+      [
+        "onboard",
+        "--non-interactive",
+        "--auth-choice",
+        "kimi-code-api-key",
+        "--kimi-code-api-key",
+        "sk-kimi-code-test",
+      ],
+      { from: "user" },
+    );
+    expect(onboardCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nonInteractive: true,
+        authChoice: "kimi-code-api-key",
+        kimiCodeApiKey: "sk-kimi-code-test",
       }),
       runtime,
     );

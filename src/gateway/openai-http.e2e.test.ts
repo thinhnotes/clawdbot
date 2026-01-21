@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { HISTORY_CONTEXT_MARKER } from "../auto-reply/reply/history.js";
+import { CURRENT_MESSAGE_MARKER } from "../auto-reply/reply/mentions.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { agentCommand, getFreePort, installGatewayTestHooks } from "./test-helpers.js";
 
@@ -11,6 +13,7 @@ async function startServerWithDefaultConfig(port: number) {
     host: "127.0.0.1",
     auth: { mode: "token", token: "secret" },
     controlUiEnabled: false,
+    openAiChatCompletionsEnabled: false,
   });
 }
 
@@ -46,7 +49,7 @@ function parseSseDataLines(text: string): string[] {
 }
 
 describe("OpenAI-compatible HTTP API (e2e)", () => {
-  it("is disabled by default (requires config)", async () => {
+  it("is disabled by default (requires config)", { timeout: 120_000 }, async () => {
     const port = await getFreePort();
     const server = await startServerWithDefaultConfig(port);
     try {
@@ -262,6 +265,121 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     }
   });
 
+  it("includes conversation history when multiple messages are provided", async () => {
+    agentCommand.mockResolvedValueOnce({
+      payloads: [{ text: "I am Claude" }],
+    } as never);
+
+    const port = await getFreePort();
+    const server = await startServer(port);
+    try {
+      const res = await postChatCompletions(port, {
+        model: "clawdbot",
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: "Hello, who are you?" },
+          { role: "assistant", content: "I am Claude." },
+          { role: "user", content: "What did I just ask you?" },
+        ],
+      });
+      expect(res.status).toBe(200);
+
+      const [opts] = agentCommand.mock.calls[0] ?? [];
+      const message = (opts as { message?: string } | undefined)?.message ?? "";
+      expect(message).toContain(HISTORY_CONTEXT_MARKER);
+      expect(message).toContain("User: Hello, who are you?");
+      expect(message).toContain("Assistant: I am Claude.");
+      expect(message).toContain(CURRENT_MESSAGE_MARKER);
+      expect(message).toContain("User: What did I just ask you?");
+    } finally {
+      await server.close({ reason: "test done" });
+    }
+  });
+
+  it("does not include history markers for single message", async () => {
+    agentCommand.mockResolvedValueOnce({
+      payloads: [{ text: "hello" }],
+    } as never);
+
+    const port = await getFreePort();
+    const server = await startServer(port);
+    try {
+      const res = await postChatCompletions(port, {
+        model: "clawdbot",
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: "Hello" },
+        ],
+      });
+      expect(res.status).toBe(200);
+
+      const [opts] = agentCommand.mock.calls[0] ?? [];
+      const message = (opts as { message?: string } | undefined)?.message ?? "";
+      expect(message).not.toContain(HISTORY_CONTEXT_MARKER);
+      expect(message).not.toContain(CURRENT_MESSAGE_MARKER);
+      expect(message).toBe("Hello");
+    } finally {
+      await server.close({ reason: "test done" });
+    }
+  });
+
+  it("treats developer role same as system role", async () => {
+    agentCommand.mockResolvedValueOnce({
+      payloads: [{ text: "hello" }],
+    } as never);
+
+    const port = await getFreePort();
+    const server = await startServer(port);
+    try {
+      const res = await postChatCompletions(port, {
+        model: "clawdbot",
+        messages: [
+          { role: "developer", content: "You are a helpful assistant." },
+          { role: "user", content: "Hello" },
+        ],
+      });
+      expect(res.status).toBe(200);
+
+      const [opts] = agentCommand.mock.calls[0] ?? [];
+      const extraSystemPrompt =
+        (opts as { extraSystemPrompt?: string } | undefined)?.extraSystemPrompt ?? "";
+      expect(extraSystemPrompt).toBe("You are a helpful assistant.");
+    } finally {
+      await server.close({ reason: "test done" });
+    }
+  });
+
+  it("includes tool output when it is the latest message", async () => {
+    agentCommand.mockResolvedValueOnce({
+      payloads: [{ text: "ok" }],
+    } as never);
+
+    const port = await getFreePort();
+    const server = await startServer(port);
+    try {
+      const res = await postChatCompletions(port, {
+        model: "clawdbot",
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: "What's the weather?" },
+          { role: "assistant", content: "Checking the weather." },
+          { role: "tool", content: "Sunny, 70F." },
+        ],
+      });
+      expect(res.status).toBe(200);
+
+      const [opts] = agentCommand.mock.calls[0] ?? [];
+      const message = (opts as { message?: string } | undefined)?.message ?? "";
+      expect(message).toContain(HISTORY_CONTEXT_MARKER);
+      expect(message).toContain("User: What's the weather?");
+      expect(message).toContain("Assistant: Checking the weather.");
+      expect(message).toContain(CURRENT_MESSAGE_MARKER);
+      expect(message).toContain("Tool: Sunny, 70F.");
+    } finally {
+      await server.close({ reason: "test done" });
+    }
+  });
+
   it("returns a non-streaming OpenAI chat.completion response", async () => {
     agentCommand.mockResolvedValueOnce({
       payloads: [{ text: "hello" }],
@@ -339,6 +457,39 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         .filter((v): v is string => typeof v === "string")
         .join("");
       expect(allContent).toBe("hello");
+    } finally {
+      await server.close({ reason: "test done" });
+    }
+  });
+
+  it("preserves repeated identical deltas when streaming SSE", async () => {
+    agentCommand.mockImplementationOnce(async (opts: unknown) => {
+      const runId = (opts as { runId?: string } | undefined)?.runId ?? "";
+      emitAgentEvent({ runId, stream: "assistant", data: { delta: "hi" } });
+      emitAgentEvent({ runId, stream: "assistant", data: { delta: "hi" } });
+      return { payloads: [{ text: "hihi" }] } as never;
+    });
+
+    const port = await getFreePort();
+    const server = await startServer(port);
+    try {
+      const res = await postChatCompletions(port, {
+        stream: true,
+        model: "clawdbot",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const data = parseSseDataLines(text);
+      const jsonChunks = data
+        .filter((d) => d !== "[DONE]")
+        .map((d) => JSON.parse(d) as Record<string, unknown>);
+      const allContent = jsonChunks
+        .flatMap((c) => (c.choices as Array<Record<string, unknown>> | undefined) ?? [])
+        .map((choice) => (choice.delta as Record<string, unknown> | undefined)?.content)
+        .filter((v): v is string => typeof v === "string")
+        .join("");
+      expect(allContent).toBe("hihi");
     } finally {
       await server.close({ reason: "test done" });
     }

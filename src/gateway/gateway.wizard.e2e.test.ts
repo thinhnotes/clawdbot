@@ -1,59 +1,24 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 
+import {
+  loadOrCreateDeviceIdentity,
+  publicKeyRawBase64UrlFromPem,
+  signDevicePayload,
+} from "../infra/device-identity.js";
 import { rawDataToString } from "../infra/ws.js";
+import { getDeterministicFreePortBlock } from "../test-utils/ports.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
+import { buildDeviceAuthPayload } from "./device-auth.js";
 import { PROTOCOL_VERSION } from "./protocol/index.js";
 
-async function getFreePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      if (!addr || typeof addr === "string") {
-        srv.close();
-        reject(new Error("failed to acquire free port"));
-        return;
-      }
-      const port = addr.port;
-      srv.close((err) => {
-        if (err) reject(err);
-        else resolve(port);
-      });
-    });
-  });
-}
-
-async function isPortFree(port: number): Promise<boolean> {
-  if (!Number.isFinite(port) || port <= 0 || port > 65535) return false;
-  return await new Promise((resolve) => {
-    const srv = createServer();
-    srv.once("error", () => resolve(false));
-    srv.listen(port, "127.0.0.1", () => {
-      srv.close(() => resolve(true));
-    });
-  });
-}
-
 async function getFreeGatewayPort(): Promise<number> {
-  // Gateway uses derived ports (bridge/browser/canvas). Avoid flaky collisions by
-  // ensuring the common derived offsets are free too.
-  for (let attempt = 0; attempt < 25; attempt += 1) {
-    const port = await getFreePort();
-    const candidates = [port, port + 1, port + 2, port + 4];
-    const ok = (await Promise.all(candidates.map((candidate) => isPortFree(candidate)))).every(
-      Boolean,
-    );
-    if (ok) return port;
-  }
-  throw new Error("failed to acquire a free gateway port block");
+  return await getDeterministicFreePortBlock({ offsets: [0, 1, 2, 3, 4] });
 }
 
 async function onceMessage<T = unknown>(
@@ -84,6 +49,23 @@ async function onceMessage<T = unknown>(
 async function connectReq(params: { url: string; token?: string }) {
   const ws = new WebSocket(params.url);
   await new Promise<void>((resolve) => ws.once("open", resolve));
+  const identity = loadOrCreateDeviceIdentity();
+  const signedAtMs = Date.now();
+  const payload = buildDeviceAuthPayload({
+    deviceId: identity.deviceId,
+    clientId: GATEWAY_CLIENT_NAMES.TEST,
+    clientMode: GATEWAY_CLIENT_MODES.TEST,
+    role: "operator",
+    scopes: [],
+    signedAtMs,
+    token: params.token ?? null,
+  });
+  const device = {
+    id: identity.deviceId,
+    publicKey: publicKeyRawBase64UrlFromPem(identity.publicKeyPem),
+    signature: signDevicePayload(identity.privateKeyPem, payload),
+    signedAt: signedAtMs,
+  };
   ws.send(
     JSON.stringify({
       type: "req",
@@ -101,6 +83,7 @@ async function connectReq(params: { url: string; token?: string }) {
         },
         caps: [],
         auth: params.token ? { token: params.token } : undefined,
+        device,
       },
     }),
   );
@@ -227,8 +210,8 @@ describe("gateway wizard (e2e)", () => {
       expect(didSendToken).toBe(true);
       expect(next.status).toBe("done");
 
-      const { CONFIG_PATH_CLAWDBOT } = await import("../config/config.js");
-      const parsed = JSON.parse(await fs.readFile(CONFIG_PATH_CLAWDBOT, "utf8"));
+      const { resolveConfigPath } = await import("../config/config.js");
+      const parsed = JSON.parse(await fs.readFile(resolveConfigPath(), "utf8"));
       const token = (parsed as Record<string, unknown>)?.gateway as
         | Record<string, unknown>
         | undefined;
@@ -268,5 +251,5 @@ describe("gateway wizard (e2e)", () => {
       process.env.CLAWDBOT_SKIP_CRON = prev.skipCron;
       process.env.CLAWDBOT_SKIP_CANVAS_HOST = prev.skipCanvas;
     }
-  }, 60_000);
+  }, 90_000);
 });

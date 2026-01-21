@@ -22,6 +22,16 @@ vi.mock("../config/config.js", async (importOriginal) => {
 
 import { createClawdbotTools } from "./clawdbot-tools.js";
 
+const waitForCalls = async (getCount: () => number, count: number, timeoutMs = 2000) => {
+  const start = Date.now();
+  while (getCount() < count) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`timed out waiting for ${count} calls`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+};
+
 describe("sessions tools", () => {
   it("uses number (not integer) in tool schemas for Gemini compatibility", () => {
     const tools = createClawdbotTools();
@@ -54,6 +64,7 @@ describe("sessions tools", () => {
     expect(schemaProp("sessions_list", "activeMinutes").type).toBe("number");
     expect(schemaProp("sessions_list", "messageLimit").type).toBe("number");
     expect(schemaProp("sessions_send", "timeoutSeconds").type).toBe("number");
+    expect(schemaProp("sessions_spawn", "thinking").type).toBe("string");
     expect(schemaProp("sessions_spawn", "runTimeoutSeconds").type).toBe("number");
     expect(schemaProp("sessions_spawn", "timeoutSeconds").type).toBe("number");
   });
@@ -239,8 +250,9 @@ describe("sessions tools", () => {
       runId: "run-1",
       delivery: { status: "pending", mode: "announce" },
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitForCalls(() => calls.filter((call) => call.method === "agent").length, 4);
+    await waitForCalls(() => calls.filter((call) => call.method === "agent.wait").length, 4);
+    await waitForCalls(() => calls.filter((call) => call.method === "chat.history").length, 4);
 
     const waitPromise = tool.execute("call6", {
       sessionKey: "main",
@@ -254,8 +266,9 @@ describe("sessions tools", () => {
       delivery: { status: "pending", mode: "announce" },
     });
     expect(typeof (waited.details as { runId?: string }).runId).toBe("string");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitForCalls(() => calls.filter((call) => call.method === "agent").length, 8);
+    await waitForCalls(() => calls.filter((call) => call.method === "agent.wait").length, 8);
+    await waitForCalls(() => calls.filter((call) => call.method === "chat.history").length, 8);
 
     const agentCalls = calls.filter((call) => call.method === "agent");
     const waitCalls = calls.filter((call) => call.method === "agent.wait");

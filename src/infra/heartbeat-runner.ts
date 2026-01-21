@@ -8,7 +8,7 @@ import {
 } from "../auto-reply/heartbeat.js";
 import { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { getChannelPlugin, normalizeChannelId } from "../channels/plugins/index.js";
+import { getChannelPlugin } from "../channels/plugins/index.js";
 import type { ChannelHeartbeatDeps } from "../channels/plugins/types.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
 import type { ClawdbotConfig } from "../config/config.js";
@@ -22,11 +22,11 @@ import {
 } from "../config/sessions.js";
 import type { AgentDefaultsConfig } from "../config/types.agent-defaults.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { createSubsystemLogger } from "../logging.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getQueueSize } from "../process/command-queue.js";
+import { CommandLane } from "../process/lanes.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
 import { normalizeAgentId } from "../routing/session-key.js";
-import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
 import { emitHeartbeatEvent } from "./heartbeat-events.js";
 import {
   type HeartbeatRunResult,
@@ -58,6 +58,48 @@ type HeartbeatAgent = {
   heartbeat?: HeartbeatConfig;
 };
 
+export type HeartbeatSummary = {
+  enabled: boolean;
+  every: string;
+  everyMs: number | null;
+  prompt: string;
+  target: string;
+  model?: string;
+  ackMaxChars: number;
+};
+
+const DEFAULT_HEARTBEAT_TARGET = "last";
+
+type HeartbeatAgentState = {
+  agentId: string;
+  heartbeat?: HeartbeatConfig;
+  intervalMs: number;
+  lastRunMs?: number;
+  nextDueMs: number;
+};
+
+export type HeartbeatRunner = {
+  stop: () => void;
+  updateConfig: (cfg: ClawdbotConfig) => void;
+};
+
+function hasExplicitHeartbeatAgents(cfg: ClawdbotConfig) {
+  const list = cfg.agents?.list ?? [];
+  return list.some((entry) => Boolean(entry?.heartbeat));
+}
+
+export function isHeartbeatEnabledForAgent(cfg: ClawdbotConfig, agentId?: string): boolean {
+  const resolvedAgentId = normalizeAgentId(agentId ?? resolveDefaultAgentId(cfg));
+  const list = cfg.agents?.list ?? [];
+  const hasExplicit = hasExplicitHeartbeatAgents(cfg);
+  if (hasExplicit) {
+    return list.some(
+      (entry) => Boolean(entry?.heartbeat) && normalizeAgentId(entry?.id) === resolvedAgentId,
+    );
+  }
+  return resolvedAgentId === resolveDefaultAgentId(cfg);
+}
+
 function resolveHeartbeatConfig(
   cfg: ClawdbotConfig,
   agentId?: string,
@@ -69,11 +111,59 @@ function resolveHeartbeatConfig(
   return { ...defaults, ...overrides };
 }
 
+export function resolveHeartbeatSummaryForAgent(
+  cfg: ClawdbotConfig,
+  agentId?: string,
+): HeartbeatSummary {
+  const defaults = cfg.agents?.defaults?.heartbeat;
+  const overrides = agentId ? resolveAgentConfig(cfg, agentId)?.heartbeat : undefined;
+  const enabled = isHeartbeatEnabledForAgent(cfg, agentId);
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      every: "disabled",
+      everyMs: null,
+      prompt: resolveHeartbeatPromptText(defaults?.prompt),
+      target: defaults?.target ?? DEFAULT_HEARTBEAT_TARGET,
+      model: defaults?.model,
+      ackMaxChars: Math.max(0, defaults?.ackMaxChars ?? DEFAULT_HEARTBEAT_ACK_MAX_CHARS),
+    };
+  }
+
+  const merged = defaults || overrides ? { ...defaults, ...overrides } : undefined;
+  const every = merged?.every ?? defaults?.every ?? overrides?.every ?? DEFAULT_HEARTBEAT_EVERY;
+  const everyMs = resolveHeartbeatIntervalMs(cfg, undefined, merged);
+  const prompt = resolveHeartbeatPromptText(
+    merged?.prompt ?? defaults?.prompt ?? overrides?.prompt,
+  );
+  const target =
+    merged?.target ?? defaults?.target ?? overrides?.target ?? DEFAULT_HEARTBEAT_TARGET;
+  const model = merged?.model ?? defaults?.model ?? overrides?.model;
+  const ackMaxChars = Math.max(
+    0,
+    merged?.ackMaxChars ??
+      defaults?.ackMaxChars ??
+      overrides?.ackMaxChars ??
+      DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
+  );
+
+  return {
+    enabled: true,
+    every,
+    everyMs,
+    prompt,
+    target,
+    model,
+    ackMaxChars,
+  };
+}
+
 function resolveHeartbeatAgents(cfg: ClawdbotConfig): HeartbeatAgent[] {
   const list = cfg.agents?.list ?? [];
-  const explicit = list.filter((entry) => entry?.heartbeat);
-  if (explicit.length > 0) {
-    return explicit
+  if (hasExplicitHeartbeatAgents(cfg)) {
+    return list
+      .filter((entry) => entry?.heartbeat)
       .map((entry) => {
         const id = normalizeAgentId(entry.id);
         return { agentId: id, heartbeat: resolveHeartbeatConfig(cfg, id) };
@@ -108,9 +198,7 @@ export function resolveHeartbeatIntervalMs(
 }
 
 export function resolveHeartbeatPrompt(cfg: ClawdbotConfig, heartbeat?: HeartbeatConfig) {
-  return resolveHeartbeatPromptText(
-    heartbeat?.prompt ?? cfg.agents?.defaults?.heartbeat?.prompt,
-  );
+  return resolveHeartbeatPromptText(heartbeat?.prompt ?? cfg.agents?.defaults?.heartbeat?.prompt);
 }
 
 function resolveHeartbeatAckMaxChars(cfg: ClawdbotConfig, heartbeat?: HeartbeatConfig) {
@@ -127,9 +215,7 @@ function resolveHeartbeatSession(cfg: ClawdbotConfig, agentId?: string) {
   const scope = sessionCfg?.scope ?? "per-sender";
   const resolvedAgentId = normalizeAgentId(agentId ?? resolveDefaultAgentId(cfg));
   const sessionKey =
-    scope === "global"
-      ? "global"
-      : resolveAgentMainSessionKey({ cfg, agentId: resolvedAgentId });
+    scope === "global" ? "global" : resolveAgentMainSessionKey({ cfg, agentId: resolvedAgentId });
   const storeAgentId = scope === "global" ? resolveDefaultAgentId(cfg) : resolvedAgentId;
   const storePath = resolveStorePath(sessionCfg?.store, { agentId: storeAgentId });
   const store = loadSessionStore(storePath);
@@ -248,11 +334,14 @@ export async function runHeartbeatOnce(opts: {
   if (!heartbeatsEnabled) {
     return { status: "skipped", reason: "disabled" };
   }
+  if (!isHeartbeatEnabledForAgent(cfg, agentId)) {
+    return { status: "skipped", reason: "disabled" };
+  }
   if (!resolveHeartbeatIntervalMs(cfg, undefined, heartbeat)) {
     return { status: "skipped", reason: "disabled" };
   }
 
-  const queueSize = (opts.deps?.getQueueSize ?? getQueueSize)("main");
+  const queueSize = (opts.deps?.getQueueSize ?? getQueueSize)(CommandLane.Main);
   if (queueSize > 0) {
     return { status: "skipped", reason: "requests-in-flight" };
   }
@@ -261,15 +350,13 @@ export async function runHeartbeatOnce(opts: {
   const { entry, sessionKey, storePath } = resolveHeartbeatSession(cfg, agentId);
   const previousUpdatedAt = entry?.updatedAt;
   const delivery = resolveHeartbeatDeliveryTarget({ cfg, entry, heartbeat });
-  const lastChannel =
-    entry?.lastChannel && entry.lastChannel !== INTERNAL_MESSAGE_CHANNEL
-      ? normalizeChannelId(entry.lastChannel)
-      : undefined;
+  const lastChannel = delivery.lastChannel;
+  const lastAccountId = delivery.lastAccountId;
   const senderProvider = delivery.channel !== "none" ? delivery.channel : lastChannel;
   const senderAllowFrom = senderProvider
     ? (getChannelPlugin(senderProvider)?.config.resolveAllowFrom?.({
         cfg,
-        accountId: senderProvider === lastChannel ? entry?.lastAccountId : undefined,
+        accountId: senderProvider === lastChannel ? lastAccountId : undefined,
       }) ?? [])
     : [];
   const sender = resolveHeartbeatSender({
@@ -337,8 +424,10 @@ export async function runHeartbeatOnce(opts: {
 
     // Suppress duplicate heartbeats (same payload) within a short window.
     // This prevents "nagging" when nothing changed but the model repeats the same items.
-    const prevHeartbeatText = typeof entry?.lastHeartbeatText === "string" ? entry.lastHeartbeatText : "";
-    const prevHeartbeatAt = typeof entry?.lastHeartbeatSentAt === "number" ? entry.lastHeartbeatSentAt : undefined;
+    const prevHeartbeatText =
+      typeof entry?.lastHeartbeatText === "string" ? entry.lastHeartbeatText : "";
+    const prevHeartbeatAt =
+      typeof entry?.lastHeartbeatSentAt === "number" ? entry.lastHeartbeatSentAt : undefined;
     const isDuplicateMain =
       !shouldSkipMain &&
       !mediaUrls.length &&
@@ -382,7 +471,7 @@ export async function runHeartbeatOnce(opts: {
       return { status: "ran", durationMs: Date.now() - startedAt };
     }
 
-    const deliveryAccountId = delivery.channel === lastChannel ? entry?.lastAccountId : undefined;
+    const deliveryAccountId = delivery.accountId;
     const heartbeatPlugin = getChannelPlugin(delivery.channel);
     if (heartbeatPlugin?.heartbeat?.checkReady) {
       const readiness = await heartbeatPlugin.heartbeat.checkReady({
@@ -463,24 +552,97 @@ export function startHeartbeatRunner(opts: {
   cfg?: ClawdbotConfig;
   runtime?: RuntimeEnv;
   abortSignal?: AbortSignal;
-}) {
-  const cfg = opts.cfg ?? loadConfig();
-  const heartbeatAgents = resolveHeartbeatAgents(cfg);
-  const intervals = heartbeatAgents
-    .map((agent) => resolveHeartbeatIntervalMs(cfg, undefined, agent.heartbeat))
-    .filter((value): value is number => typeof value === "number");
-  const intervalMs = intervals.length > 0 ? Math.min(...intervals) : null;
-  if (!intervalMs) {
-    log.info("heartbeat: disabled", { enabled: false });
-  }
-
+  runOnce?: typeof runHeartbeatOnce;
+}): HeartbeatRunner {
   const runtime = opts.runtime ?? defaultRuntime;
-  const lastRunByAgent = new Map<string, number>();
+  const runOnce = opts.runOnce ?? runHeartbeatOnce;
+  const state = {
+    cfg: opts.cfg ?? loadConfig(),
+    runtime,
+    agents: new Map<string, HeartbeatAgentState>(),
+    timer: null as NodeJS.Timeout | null,
+    stopped: false,
+  };
+  let initialized = false;
+
+  const resolveNextDue = (now: number, intervalMs: number, prevState?: HeartbeatAgentState) => {
+    if (typeof prevState?.lastRunMs === "number") {
+      return prevState.lastRunMs + intervalMs;
+    }
+    if (prevState && prevState.intervalMs === intervalMs && prevState.nextDueMs > now) {
+      return prevState.nextDueMs;
+    }
+    return now + intervalMs;
+  };
+
+  const scheduleNext = () => {
+    if (state.stopped) return;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    if (state.agents.size === 0) return;
+    const now = Date.now();
+    let nextDue = Number.POSITIVE_INFINITY;
+    for (const agent of state.agents.values()) {
+      if (agent.nextDueMs < nextDue) nextDue = agent.nextDueMs;
+    }
+    if (!Number.isFinite(nextDue)) return;
+    const delay = Math.max(0, nextDue - now);
+    state.timer = setTimeout(() => {
+      requestHeartbeatNow({ reason: "interval", coalesceMs: 0 });
+    }, delay);
+    state.timer.unref?.();
+  };
+
+  const updateConfig = (cfg: ClawdbotConfig) => {
+    if (state.stopped) return;
+    const now = Date.now();
+    const prevAgents = state.agents;
+    const prevEnabled = prevAgents.size > 0;
+    const nextAgents = new Map<string, HeartbeatAgentState>();
+    const intervals: number[] = [];
+    for (const agent of resolveHeartbeatAgents(cfg)) {
+      const intervalMs = resolveHeartbeatIntervalMs(cfg, undefined, agent.heartbeat);
+      if (!intervalMs) continue;
+      intervals.push(intervalMs);
+      const prevState = prevAgents.get(agent.agentId);
+      const nextDueMs = resolveNextDue(now, intervalMs, prevState);
+      nextAgents.set(agent.agentId, {
+        agentId: agent.agentId,
+        heartbeat: agent.heartbeat,
+        intervalMs,
+        lastRunMs: prevState?.lastRunMs,
+        nextDueMs,
+      });
+    }
+
+    state.cfg = cfg;
+    state.agents = nextAgents;
+    const nextEnabled = nextAgents.size > 0;
+    if (!initialized) {
+      if (!nextEnabled) {
+        log.info("heartbeat: disabled", { enabled: false });
+      } else {
+        log.info("heartbeat: started", { intervalMs: Math.min(...intervals) });
+      }
+      initialized = true;
+    } else if (prevEnabled !== nextEnabled) {
+      if (!nextEnabled) {
+        log.info("heartbeat: disabled", { enabled: false });
+      } else {
+        log.info("heartbeat: started", { intervalMs: Math.min(...intervals) });
+      }
+    }
+
+    scheduleNext();
+  };
+
   const run: HeartbeatWakeHandler = async (params) => {
     if (!heartbeatsEnabled) {
       return { status: "skipped", reason: "disabled" } satisfies HeartbeatRunResult;
     }
-    if (heartbeatAgents.length === 0) {
+    if (state.agents.size === 0) {
       return { status: "skipped", reason: "disabled" } satisfies HeartbeatRunResult;
     }
 
@@ -490,52 +652,44 @@ export function startHeartbeatRunner(opts: {
     const now = startedAt;
     let ran = false;
 
-    for (const agent of heartbeatAgents) {
-      const agentIntervalMs = resolveHeartbeatIntervalMs(cfg, undefined, agent.heartbeat);
-      if (!agentIntervalMs) continue;
-      const lastRun = lastRunByAgent.get(agent.agentId);
-      if (isInterval && typeof lastRun === "number" && now - lastRun < agentIntervalMs) {
+    for (const agent of state.agents.values()) {
+      if (isInterval && now < agent.nextDueMs) {
         continue;
       }
 
-      const res = await runHeartbeatOnce({
-        cfg,
+      const res = await runOnce({
+        cfg: state.cfg,
         agentId: agent.agentId,
         heartbeat: agent.heartbeat,
         reason,
-        deps: { runtime },
+        deps: { runtime: state.runtime },
       });
       if (res.status === "skipped" && res.reason === "requests-in-flight") {
         return res;
       }
       if (res.status !== "skipped" || res.reason !== "disabled") {
-        lastRunByAgent.set(agent.agentId, now);
+        agent.lastRunMs = now;
+        agent.nextDueMs = now + agent.intervalMs;
       }
       if (res.status === "ran") ran = true;
     }
 
+    scheduleNext();
     if (ran) return { status: "ran", durationMs: Date.now() - startedAt };
     return { status: "skipped", reason: isInterval ? "not-due" : "disabled" };
   };
 
   setHeartbeatWakeHandler(async (params) => run({ reason: params.reason }));
-
-  let timer: NodeJS.Timeout | null = null;
-  if (intervalMs) {
-    timer = setInterval(() => {
-      requestHeartbeatNow({ reason: "interval", coalesceMs: 0 });
-    }, intervalMs);
-    timer.unref?.();
-    log.info("heartbeat: started", { intervalMs });
-  }
+  updateConfig(state.cfg);
 
   const cleanup = () => {
+    state.stopped = true;
     setHeartbeatWakeHandler(null);
-    if (timer) clearInterval(timer);
-    timer = null;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = null;
   };
 
   opts.abortSignal?.addEventListener("abort", cleanup, { once: true });
 
-  return { stop: cleanup };
+  return { stop: cleanup, updateConfig };
 }

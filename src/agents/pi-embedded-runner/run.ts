@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import { enqueueCommandInLane } from "../../process/command-queue.js";
 import { resolveUserPath } from "../../utils.js";
+import { isMarkdownCapableMessageChannel } from "../../utils/message-channel.js";
 import { resolveClawdbotAgentDir } from "../agent-paths.js";
 import {
   markAuthProfileFailure,
@@ -20,7 +21,9 @@ import {
   ensureAuthProfileStore,
   getApiKeyForModel,
   resolveAuthProfileOrder,
+  type ResolvedProviderAuth,
 } from "../model-auth.js";
+import { normalizeProviderId } from "../model-selection.js";
 import { ensureClawdbotModelsJson } from "../models-config.js";
 import {
   classifyFailoverReason,
@@ -30,6 +33,7 @@ import {
   isContextOverflowError,
   isFailoverAssistantError,
   isFailoverErrorMessage,
+  parseImageDimensionError,
   isRateLimitAssistantError,
   isTimeoutErrorMessage,
   pickFallbackThinkingLevel,
@@ -45,11 +49,7 @@ import { buildEmbeddedRunPayloads } from "./run/payloads.js";
 import type { EmbeddedPiAgentMeta, EmbeddedPiRunResult } from "./types.js";
 import { describeUnknownError } from "./utils.js";
 
-type ApiKeyInfo = {
-  apiKey: string;
-  profileId?: string;
-  source: string;
-};
+type ApiKeyInfo = ResolvedProviderAuth;
 
 export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
@@ -58,6 +58,14 @@ export async function runEmbeddedPiAgent(
   const globalLane = resolveGlobalLane(params.lane);
   const enqueueGlobal =
     params.enqueue ?? ((task, opts) => enqueueCommandInLane(globalLane, task, opts));
+  const channelHint = params.messageChannel ?? params.messageProvider;
+  const resolvedToolResultFormat =
+    params.toolResultFormat ??
+    (channelHint
+      ? isMarkdownCapableMessageChannel(channelHint)
+        ? "markdown"
+        : "plain"
+      : "markdown");
 
   return enqueueCommandInLane(sessionLane, () =>
     enqueueGlobal(async () => {
@@ -107,16 +115,26 @@ export async function runEmbeddedPiAgent(
         );
       }
 
-      const authStore = ensureAuthProfileStore(agentDir);
-      const explicitProfileId = params.authProfileId?.trim();
+      const authStore = ensureAuthProfileStore(agentDir, { allowKeychainPrompt: false });
+      const preferredProfileId = params.authProfileId?.trim();
+      let lockedProfileId = params.authProfileIdSource === "user" ? preferredProfileId : undefined;
+      if (lockedProfileId) {
+        const lockedProfile = authStore.profiles[lockedProfileId];
+        if (
+          !lockedProfile ||
+          normalizeProviderId(lockedProfile.provider) !== normalizeProviderId(provider)
+        ) {
+          lockedProfileId = undefined;
+        }
+      }
       const profileOrder = resolveAuthProfileOrder({
         cfg: params.config,
         store: authStore,
         provider,
-        preferredProfile: explicitProfileId,
+        preferredProfile: preferredProfileId,
       });
-      if (explicitProfileId && !profileOrder.includes(explicitProfileId)) {
-        throw new Error(`Auth profile "${explicitProfileId}" is not configured for ${provider}.`);
+      if (lockedProfileId && !profileOrder.includes(lockedProfileId)) {
+        throw new Error(`Auth profile "${lockedProfileId}" is not configured for ${provider}.`);
       }
       const profileCandidates = profileOrder.length > 0 ? profileOrder : [undefined];
       let profileIndex = 0;
@@ -139,6 +157,15 @@ export async function runEmbeddedPiAgent(
 
       const applyApiKeyInfo = async (candidate?: string): Promise<void> => {
         apiKeyInfo = await resolveApiKeyForCandidate(candidate);
+        if (!apiKeyInfo.apiKey) {
+          if (apiKeyInfo.mode !== "aws-sdk") {
+            throw new Error(
+              `No API key resolved for provider "${model.provider}" (auth mode: ${apiKeyInfo.mode}).`,
+            );
+          }
+          lastProfileId = apiKeyInfo.profileId;
+          return;
+        }
         if (model.provider === "github-copilot") {
           const { resolveCopilotApiToken } =
             await import("../../providers/github-copilot-token.js");
@@ -153,6 +180,7 @@ export async function runEmbeddedPiAgent(
       };
 
       const advanceAuthProfile = async (): Promise<boolean> => {
+        if (lockedProfileId) return false;
         let nextIndex = profileIndex + 1;
         while (nextIndex < profileCandidates.length) {
           const candidate = profileCandidates[nextIndex];
@@ -163,7 +191,7 @@ export async function runEmbeddedPiAgent(
             attemptedThinking.clear();
             return true;
           } catch (err) {
-            if (candidate && candidate === explicitProfileId) throw err;
+            if (candidate && candidate === lockedProfileId) throw err;
             nextIndex += 1;
           }
         }
@@ -173,7 +201,7 @@ export async function runEmbeddedPiAgent(
       try {
         await applyApiKeyInfo(profileCandidates[profileIndex]);
       } catch (err) {
-        if (profileCandidates[profileIndex] === explicitProfileId) throw err;
+        if (profileCandidates[profileIndex] === lockedProfileId) throw err;
         const advanced = await advanceAuthProfile();
         if (!advanced) throw err;
       }
@@ -189,6 +217,8 @@ export async function runEmbeddedPiAgent(
             messageChannel: params.messageChannel,
             messageProvider: params.messageProvider,
             agentAccountId: params.agentAccountId,
+            messageTo: params.messageTo,
+            messageThreadId: params.messageThreadId,
             currentChannelId: params.currentChannelId,
             currentThreadTs: params.currentThreadTs,
             replyToMode: params.replyToMode,
@@ -208,11 +238,14 @@ export async function runEmbeddedPiAgent(
             thinkLevel,
             verboseLevel: params.verboseLevel,
             reasoningLevel: params.reasoningLevel,
+            toolResultFormat: resolvedToolResultFormat,
+            execOverrides: params.execOverrides,
             bashElevated: params.bashElevated,
             timeoutMs: params.timeoutMs,
             runId: params.runId,
             abortSignal: params.abortSignal,
             shouldEmitToolResult: params.shouldEmitToolResult,
+            shouldEmitToolOutput: params.shouldEmitToolOutput,
             onPartialReply: params.onPartialReply,
             onAssistantMessageStart: params.onAssistantMessageStart,
             onBlockReply: params.onBlockReply,
@@ -223,6 +256,7 @@ export async function runEmbeddedPiAgent(
             onToolResult: params.onToolResult,
             onAgentEvent: params.onAgentEvent,
             extraSystemPrompt: params.extraSystemPrompt,
+            streamParams: params.streamParams,
             ownerNumbers: params.ownerNumbers,
             enforceFinalTag: params.enforceFinalTag,
           });
@@ -256,6 +290,29 @@ export async function runEmbeddedPiAgent(
                 },
               };
             }
+            // Handle role ordering errors with a user-friendly message
+            if (/incorrect role information|roles must alternate/i.test(errorText)) {
+              return {
+                payloads: [
+                  {
+                    text:
+                      "Message ordering conflict - please try again. " +
+                      "If this persists, use /new to start a fresh session.",
+                    isError: true,
+                  },
+                ],
+                meta: {
+                  durationMs: Date.now() - started,
+                  agentMeta: {
+                    sessionId: sessionIdUsed,
+                    provider,
+                    model: model.id,
+                  },
+                  systemPromptReport: attempt.systemPromptReport,
+                  error: { kind: "role_ordering", message: errorText },
+                },
+              };
+            }
             const promptFailoverReason = classifyFailoverReason(errorText);
             if (promptFailoverReason && promptFailoverReason !== "timeout" && lastProfileId) {
               await markAuthProfileFailure({
@@ -284,6 +341,19 @@ export async function runEmbeddedPiAgent(
               thinkLevel = fallbackThinking;
               continue;
             }
+            // FIX: Throw FailoverError for prompt errors when fallbacks configured
+            // This enables model fallback for quota/rate limit errors during prompt submission
+            const promptFallbackConfigured =
+              (params.config?.agents?.defaults?.model?.fallbacks?.length ?? 0) > 0;
+            if (promptFallbackConfigured && isFailoverErrorMessage(errorText)) {
+              throw new FailoverError(errorText, {
+                reason: promptFailoverReason ?? "unknown",
+                provider,
+                model: modelId,
+                profileId: lastProfileId,
+                status: resolveFailoverStatus(promptFailoverReason ?? "unknown"),
+              });
+            }
             throw promptError;
           }
 
@@ -306,6 +376,26 @@ export async function runEmbeddedPiAgent(
           const failoverFailure = isFailoverAssistantError(lastAssistant);
           const assistantFailoverReason = classifyFailoverReason(lastAssistant?.errorMessage ?? "");
           const cloudCodeAssistFormatError = attempt.cloudCodeAssistFormatError;
+          const imageDimensionError = parseImageDimensionError(lastAssistant?.errorMessage ?? "");
+
+          if (imageDimensionError && lastProfileId) {
+            const details = [
+              imageDimensionError.messageIndex !== undefined
+                ? `message=${imageDimensionError.messageIndex}`
+                : null,
+              imageDimensionError.contentIndex !== undefined
+                ? `content=${imageDimensionError.contentIndex}`
+                : null,
+              imageDimensionError.maxDimensionPx !== undefined
+                ? `limit=${imageDimensionError.maxDimensionPx}px`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            log.warn(
+              `Profile ${lastProfileId} rejected image payload${details ? ` (${details})` : ""}.`,
+            );
+          }
 
           // Treat timeout as potential rate limit (Antigravity hangs on rate limit)
           const shouldRotate = (!aborted && failoverFailure) || timedOut;
@@ -339,14 +429,15 @@ export async function runEmbeddedPiAgent(
             if (rotated) continue;
 
             if (fallbackConfigured) {
+              // Prefer formatted error message (user-friendly) over raw errorMessage
               const message =
-                lastAssistant?.errorMessage?.trim() ||
                 (lastAssistant
                   ? formatAssistantErrorText(lastAssistant, {
                       cfg: params.config,
                       sessionKey: params.sessionKey ?? params.sessionId,
                     })
-                  : "") ||
+                  : undefined) ||
+                lastAssistant?.errorMessage?.trim() ||
                 (timedOut
                   ? "LLM request timed out."
                   : rateLimitFailure
@@ -379,10 +470,12 @@ export async function runEmbeddedPiAgent(
             assistantTexts: attempt.assistantTexts,
             toolMetas: attempt.toolMetas,
             lastAssistant: attempt.lastAssistant,
+            lastToolError: attempt.lastToolError,
             config: params.config,
             sessionKey: params.sessionKey ?? params.sessionId,
             verboseLevel: params.verboseLevel,
             reasoningLevel: params.reasoningLevel,
+            toolResultFormat: resolvedToolResultFormat,
             inlineToolResultsAllowed: !params.onPartialReply && !params.onToolResult,
           });
 
@@ -407,6 +500,17 @@ export async function runEmbeddedPiAgent(
               agentMeta,
               aborted,
               systemPromptReport: attempt.systemPromptReport,
+              // Handle client tool calls (OpenResponses hosted tools)
+              stopReason: attempt.clientToolCall ? "tool_calls" : undefined,
+              pendingToolCalls: attempt.clientToolCall
+                ? [
+                    {
+                      id: `call_${Date.now()}`,
+                      name: attempt.clientToolCall.name,
+                      arguments: JSON.stringify(attempt.clientToolCall.params),
+                    },
+                  ]
+                : undefined,
             },
             didSendViaMessagingTool: attempt.didSendViaMessagingTool,
             messagingToolSentTexts: attempt.messagingToolSentTexts,

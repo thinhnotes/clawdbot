@@ -7,7 +7,7 @@ import { resolveTelegramAccount } from "../telegram/accounts.js";
 import { normalizeE164 } from "../utils.js";
 import { resolveWhatsAppAccount } from "../web/accounts.js";
 import { normalizeWhatsAppTarget } from "../whatsapp/normalize.js";
-import { getActivePluginRegistry } from "../plugins/runtime.js";
+import { requireActivePluginRegistry } from "../plugins/runtime.js";
 import {
   resolveDiscordGroupRequireMention,
   resolveIMessageGroupRequireMention,
@@ -293,27 +293,6 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
       }),
     },
   },
-  msteams: {
-    id: "msteams",
-    capabilities: {
-      chatTypes: ["direct", "channel", "thread"],
-      polls: true,
-      threads: true,
-      media: true,
-    },
-    outbound: { textChunkLimit: 4000 },
-    config: {
-      resolveAllowFrom: ({ cfg }) => cfg.channels?.msteams?.allowFrom ?? [],
-      formatAllowFrom: ({ allowFrom }) => formatLower(allowFrom),
-    },
-    threading: {
-      buildToolContext: ({ context, hasRepliedRef }) => ({
-        currentChannelId: context.To?.trim() || undefined,
-        currentThreadTs: context.ReplyToId,
-        hasRepliedRef,
-      }),
-    },
-  },
 };
 
 function buildDockFromPlugin(plugin: ChannelPlugin): ChannelDock {
@@ -341,8 +320,7 @@ function buildDockFromPlugin(plugin: ChannelPlugin): ChannelDock {
 }
 
 function listPluginDockEntries(): Array<{ id: ChannelId; dock: ChannelDock; order?: number }> {
-  const registry = getActivePluginRegistry();
-  if (!registry) return [];
+  const registry = requireActivePluginRegistry();
   const entries: Array<{ id: ChannelId; dock: ChannelDock; order?: number }> = [];
   const seen = new Set<string>();
   for (const entry of registry.channels) {
@@ -379,8 +357,8 @@ export function listChannelDocks(): ChannelDock[] {
 export function getChannelDock(id: ChannelId): ChannelDock | undefined {
   const core = DOCKS[id as ChatChannelId];
   if (core) return core;
-  const registry = getActivePluginRegistry();
-  const pluginEntry = registry?.channels.find((entry) => entry.plugin.id === id);
+  const registry = requireActivePluginRegistry();
+  const pluginEntry = registry.channels.find((entry) => entry.plugin.id === id);
   if (!pluginEntry) return undefined;
   return pluginEntry.dock ?? buildDockFromPlugin(pluginEntry.plugin);
 }

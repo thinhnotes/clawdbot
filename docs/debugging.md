@@ -59,8 +59,10 @@ Recommended flow (dev profile + dev bootstrap):
 
 ```bash
 pnpm gateway:dev
-CLAWDBOT_PROFILE=dev pnpm clawdbot tui
+CLAWDBOT_PROFILE=dev clawdbot tui
 ```
+
+If you don’t have a global install yet, run the CLI via `pnpm clawdbot ...`.
 
 What this does:
 
@@ -77,6 +79,7 @@ What this does:
    - Seeds the workspace files if missing:
      `AGENTS.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`.
    - Default identity: **C3‑PO** (protocol droid).
+   - Skips channel providers in dev mode (`CLAWDBOT_SKIP_CHANNELS=1`).
 
 Reset flow (fresh start):
 
@@ -88,7 +91,7 @@ Note: `--dev` is a **global** profile flag and gets eaten by some runners.
 If you need to spell it out, use the env var form:
 
 ```bash
-CLAWDBOT_PROFILE=dev pnpm clawdbot gateway --dev --reset
+CLAWDBOT_PROFILE=dev clawdbot gateway --dev --reset
 ```
 
 `--reset` wipes config, credentials, sessions, and the dev workspace (using

@@ -5,8 +5,19 @@ import JSON5 from "json5";
 
 import type { ClawdbotConfig, ConfigFileSnapshot } from "../config/config.js";
 import { createConfigIO } from "../config/config.js";
+import { resolveNativeSkillsEnabled } from "../config/commands.js";
 import { resolveOAuthDir } from "../config/paths.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
+import type { AgentToolsConfig } from "../config/types.tools.js";
+import { resolveBrowserConfig } from "../browser/config.js";
+import { isToolAllowedByPolicies } from "../agents/pi-tools.policy.js";
+import { resolveToolProfilePolicy } from "../agents/tool-policy.js";
+import {
+  resolveSandboxConfigForAgent,
+  resolveSandboxToolPolicyForAgent,
+} from "../agents/sandbox.js";
+import type { SandboxToolPolicy } from "../agents/sandbox/types.js";
 import { INCLUDE_KEY, MAX_INCLUDE_DEPTH } from "../config/includes.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import {
@@ -26,6 +37,8 @@ export type SecurityAuditFinding = {
   detail: string;
   remediation?: string;
 };
+
+const SMALL_MODEL_PARAM_B_MAX = 300;
 
 function expandTilde(p: string, env: NodeJS.ProcessEnv): string | null {
   if (!p.startsWith("~")) return p;
@@ -104,7 +117,7 @@ export function collectSyncedFolderFindings(params: {
       severity: "warn",
       title: "State/config path looks like a synced folder",
       detail: `stateDir=${params.stateDir}, configPath=${params.configPath}. Synced folders (iCloud/Dropbox/OneDrive/Google Drive) can leak tokens and transcripts onto other devices.`,
-      remediation: `Keep CLAWDBOT_STATE_DIR on a local-only volume and re-run "clawdbot security audit --fix".`,
+      remediation: `Keep CLAWDBOT_STATE_DIR on a local-only volume and re-run "${formatCliCommand("clawdbot security audit --fix")}".`,
     });
   }
   return findings;
@@ -260,10 +273,70 @@ const LEGACY_MODEL_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = 
   { id: "openai.gpt4_legacy", re: /\bgpt-4-(0314|0613)\b/i, label: "Legacy GPT-4 snapshots" },
 ];
 
+const WEAK_TIER_MODEL_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
+  { id: "anthropic.haiku", re: /\bhaiku\b/i, label: "Haiku tier (smaller model)" },
+];
+
+function inferParamBFromIdOrName(text: string): number | null {
+  const raw = text.toLowerCase();
+  const matches = raw.matchAll(/(?:^|[^a-z0-9])[a-z]?(\d+(?:\.\d+)?)b(?:[^a-z0-9]|$)/g);
+  let best: number | null = null;
+  for (const match of matches) {
+    const numRaw = match[1];
+    if (!numRaw) continue;
+    const value = Number(numRaw);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    if (best === null || value > best) best = value;
+  }
+  return best;
+}
+
+function isGptModel(id: string): boolean {
+  return /\bgpt-/i.test(id);
+}
+
+function isGpt5OrHigher(id: string): boolean {
+  return /\bgpt-5(?:\b|[.-])/i.test(id);
+}
+
+function isClaudeModel(id: string): boolean {
+  return /\bclaude-/i.test(id);
+}
+
+function isClaude45OrHigher(id: string): boolean {
+  return /\bclaude-[^\s/]*?(?:-4-5\b|4\.5\b)/i.test(id);
+}
+
 export function collectModelHygieneFindings(cfg: ClawdbotConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
   const models = collectModels(cfg);
   if (models.length === 0) return findings;
+
+  const weakMatches = new Map<string, { model: string; source: string; reasons: string[] }>();
+  const addWeakMatch = (model: string, source: string, reason: string) => {
+    const key = `${model}@@${source}`;
+    const existing = weakMatches.get(key);
+    if (!existing) {
+      weakMatches.set(key, { model, source, reasons: [reason] });
+      return;
+    }
+    if (!existing.reasons.includes(reason)) existing.reasons.push(reason);
+  };
+
+  for (const entry of models) {
+    for (const pat of WEAK_TIER_MODEL_PATTERNS) {
+      if (pat.re.test(entry.id)) {
+        addWeakMatch(entry.id, entry.source, pat.label);
+        break;
+      }
+    }
+    if (isGptModel(entry.id) && !isGpt5OrHigher(entry.id)) {
+      addWeakMatch(entry.id, entry.source, "Below GPT-5 family");
+    }
+    if (isClaudeModel(entry.id) && !isClaude45OrHigher(entry.id)) {
+      addWeakMatch(entry.id, entry.source, "Below Claude 4.5");
+    }
+  }
 
   const matches: Array<{ model: string; source: string; reason: string }> = [];
   for (const entry of models) {
@@ -293,6 +366,174 @@ export function collectModelHygieneFindings(cfg: ClawdbotConfig): SecurityAuditF
     });
   }
 
+  if (weakMatches.size > 0) {
+    const lines = Array.from(weakMatches.values())
+      .slice(0, 12)
+      .map((m) => `- ${m.model} (${m.reasons.join("; ")}) @ ${m.source}`)
+      .join("\n");
+    const more = weakMatches.size > 12 ? `\n…${weakMatches.size - 12} more` : "";
+    findings.push({
+      checkId: "models.weak_tier",
+      severity: "warn",
+      title: "Some configured models are below recommended tiers",
+      detail:
+        "Smaller/older models are generally more susceptible to prompt injection and tool misuse.\n" +
+        lines +
+        more,
+      remediation:
+        "Use the latest, top-tier model for any bot with tools or untrusted inboxes. Avoid Haiku tiers; prefer GPT-5+ and Claude 4.5+.",
+    });
+  }
+
+  return findings;
+}
+
+function extractAgentIdFromSource(source: string): string | null {
+  const match = source.match(/^agents\.list\.([^.]*)\./);
+  return match?.[1] ?? null;
+}
+
+function pickToolPolicy(config?: { allow?: string[]; deny?: string[] }): SandboxToolPolicy | null {
+  if (!config) return null;
+  const allow = Array.isArray(config.allow) ? config.allow : undefined;
+  const deny = Array.isArray(config.deny) ? config.deny : undefined;
+  if (!allow && !deny) return null;
+  return { allow, deny };
+}
+
+function resolveToolPolicies(params: {
+  cfg: ClawdbotConfig;
+  agentTools?: AgentToolsConfig;
+  sandboxMode?: "off" | "non-main" | "all";
+  agentId?: string | null;
+}): SandboxToolPolicy[] {
+  const policies: SandboxToolPolicy[] = [];
+  const profile = params.agentTools?.profile ?? params.cfg.tools?.profile;
+  const profilePolicy = resolveToolProfilePolicy(profile);
+  if (profilePolicy) policies.push(profilePolicy);
+
+  const globalPolicy = pickToolPolicy(params.cfg.tools ?? undefined);
+  if (globalPolicy) policies.push(globalPolicy);
+
+  const agentPolicy = pickToolPolicy(params.agentTools);
+  if (agentPolicy) policies.push(agentPolicy);
+
+  if (params.sandboxMode === "all") {
+    const sandboxPolicy = resolveSandboxToolPolicyForAgent(params.cfg, params.agentId ?? undefined);
+    policies.push(sandboxPolicy);
+  }
+
+  return policies;
+}
+
+function hasWebSearchKey(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): boolean {
+  const search = cfg.tools?.web?.search;
+  return Boolean(
+    search?.apiKey ||
+    search?.perplexity?.apiKey ||
+    env.BRAVE_API_KEY ||
+    env.PERPLEXITY_API_KEY ||
+    env.OPENROUTER_API_KEY,
+  );
+}
+
+function isWebSearchEnabled(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): boolean {
+  const enabled = cfg.tools?.web?.search?.enabled;
+  if (enabled === false) return false;
+  if (enabled === true) return true;
+  return hasWebSearchKey(cfg, env);
+}
+
+function isWebFetchEnabled(cfg: ClawdbotConfig): boolean {
+  const enabled = cfg.tools?.web?.fetch?.enabled;
+  if (enabled === false) return false;
+  return true;
+}
+
+function isBrowserEnabled(cfg: ClawdbotConfig): boolean {
+  try {
+    return resolveBrowserConfig(cfg.browser).enabled;
+  } catch {
+    return true;
+  }
+}
+
+export function collectSmallModelRiskFindings(params: {
+  cfg: ClawdbotConfig;
+  env: NodeJS.ProcessEnv;
+}): SecurityAuditFinding[] {
+  const findings: SecurityAuditFinding[] = [];
+  const models = collectModels(params.cfg).filter((entry) => !entry.source.includes("imageModel"));
+  if (models.length === 0) return findings;
+
+  const smallModels = models
+    .map((entry) => {
+      const paramB = inferParamBFromIdOrName(entry.id);
+      if (!paramB || paramB > SMALL_MODEL_PARAM_B_MAX) return null;
+      return { ...entry, paramB };
+    })
+    .filter((entry): entry is { id: string; source: string; paramB: number } => Boolean(entry));
+
+  if (smallModels.length === 0) return findings;
+
+  let hasUnsafe = false;
+  const modelLines: string[] = [];
+  const exposureSet = new Set<string>();
+  for (const entry of smallModels) {
+    const agentId = extractAgentIdFromSource(entry.source);
+    const sandboxMode = resolveSandboxConfigForAgent(params.cfg, agentId ?? undefined).mode;
+    const agentTools =
+      agentId && params.cfg.agents?.list
+        ? params.cfg.agents.list.find((agent) => agent?.id === agentId)?.tools
+        : undefined;
+    const policies = resolveToolPolicies({
+      cfg: params.cfg,
+      agentTools,
+      sandboxMode,
+      agentId,
+    });
+    const exposed: string[] = [];
+    if (isWebSearchEnabled(params.cfg, params.env)) {
+      if (isToolAllowedByPolicies("web_search", policies)) exposed.push("web_search");
+    }
+    if (isWebFetchEnabled(params.cfg)) {
+      if (isToolAllowedByPolicies("web_fetch", policies)) exposed.push("web_fetch");
+    }
+    if (isBrowserEnabled(params.cfg)) {
+      if (isToolAllowedByPolicies("browser", policies)) exposed.push("browser");
+    }
+    for (const tool of exposed) exposureSet.add(tool);
+    const sandboxLabel = sandboxMode === "all" ? "sandbox=all" : `sandbox=${sandboxMode}`;
+    const exposureLabel = exposed.length > 0 ? ` web=[${exposed.join(", ")}]` : " web=[off]";
+    const safe = sandboxMode === "all" && exposed.length === 0;
+    if (!safe) hasUnsafe = true;
+    const statusLabel = safe ? "ok" : "unsafe";
+    modelLines.push(
+      `- ${entry.id} (${entry.paramB}B) @ ${entry.source} (${statusLabel}; ${sandboxLabel};${exposureLabel})`,
+    );
+  }
+
+  const exposureList = Array.from(exposureSet);
+  const exposureDetail =
+    exposureList.length > 0
+      ? `Uncontrolled input tools allowed: ${exposureList.join(", ")}.`
+      : "No web/browser tools detected for these models.";
+
+  findings.push({
+    checkId: "models.small_params",
+    severity: hasUnsafe ? "critical" : "info",
+    title: "Small models require sandboxing and web tools disabled",
+    detail:
+      `Small models (<=${SMALL_MODEL_PARAM_B_MAX}B params) detected:\n` +
+      modelLines.join("\n") +
+      `\n` +
+      exposureDetail +
+      `\n` +
+      "Small models are not recommended for untrusted inputs.",
+    remediation:
+      'If you must use small models, enable sandboxing for all sessions (agents.defaults.sandbox.mode="all") and disable web_search/web_fetch/browser (tools.deny=["group:web","browser"]).',
+  });
+
   return findings;
 }
 
@@ -315,11 +556,76 @@ export async function collectPluginsTrustFindings(params: {
   const allow = params.cfg.plugins?.allow;
   const allowConfigured = Array.isArray(allow) && allow.length > 0;
   if (!allowConfigured) {
+    const hasString = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+    const hasAccountStringKey = (account: unknown, key: string) =>
+      Boolean(
+        account &&
+        typeof account === "object" &&
+        hasString((account as Record<string, unknown>)[key]),
+      );
+
+    const discordConfigured =
+      hasString(params.cfg.channels?.discord?.token) ||
+      Boolean(
+        params.cfg.channels?.discord?.accounts &&
+        Object.values(params.cfg.channels.discord.accounts).some((a) =>
+          hasAccountStringKey(a, "token"),
+        ),
+      ) ||
+      hasString(process.env.DISCORD_BOT_TOKEN);
+
+    const telegramConfigured =
+      hasString(params.cfg.channels?.telegram?.botToken) ||
+      hasString(params.cfg.channels?.telegram?.tokenFile) ||
+      Boolean(
+        params.cfg.channels?.telegram?.accounts &&
+        Object.values(params.cfg.channels.telegram.accounts).some(
+          (a) => hasAccountStringKey(a, "botToken") || hasAccountStringKey(a, "tokenFile"),
+        ),
+      ) ||
+      hasString(process.env.TELEGRAM_BOT_TOKEN);
+
+    const slackConfigured =
+      hasString(params.cfg.channels?.slack?.botToken) ||
+      hasString(params.cfg.channels?.slack?.appToken) ||
+      Boolean(
+        params.cfg.channels?.slack?.accounts &&
+        Object.values(params.cfg.channels.slack.accounts).some(
+          (a) => hasAccountStringKey(a, "botToken") || hasAccountStringKey(a, "appToken"),
+        ),
+      ) ||
+      hasString(process.env.SLACK_BOT_TOKEN) ||
+      hasString(process.env.SLACK_APP_TOKEN);
+
+    const skillCommandsLikelyExposed =
+      (discordConfigured &&
+        resolveNativeSkillsEnabled({
+          providerId: "discord",
+          providerSetting: params.cfg.channels?.discord?.commands?.nativeSkills,
+          globalSetting: params.cfg.commands?.nativeSkills,
+        })) ||
+      (telegramConfigured &&
+        resolveNativeSkillsEnabled({
+          providerId: "telegram",
+          providerSetting: params.cfg.channels?.telegram?.commands?.nativeSkills,
+          globalSetting: params.cfg.commands?.nativeSkills,
+        })) ||
+      (slackConfigured &&
+        resolveNativeSkillsEnabled({
+          providerId: "slack",
+          providerSetting: params.cfg.channels?.slack?.commands?.nativeSkills,
+          globalSetting: params.cfg.commands?.nativeSkills,
+        }));
+
     findings.push({
       checkId: "plugins.extensions_no_allowlist",
-      severity: "warn",
+      severity: skillCommandsLikelyExposed ? "critical" : "warn",
       title: "Extensions exist but plugins.allow is not set",
-      detail: `Found ${pluginDirs.length} extension(s) under ${extensionsDir}. Without plugins.allow, any discovered plugin id may load (depending on config and plugin behavior).`,
+      detail:
+        `Found ${pluginDirs.length} extension(s) under ${extensionsDir}. Without plugins.allow, any discovered plugin id may load (depending on config and plugin behavior).` +
+        (skillCommandsLikelyExposed
+          ? "\nNative skill commands are enabled on at least one configured chat surface; treat unpinned/unallowlisted extensions as high risk."
+          : ""),
       remediation: "Set plugins.allow to an explicit list of plugin ids you trust.",
     });
   }

@@ -87,6 +87,14 @@ final class GatewayProcessManager {
             self.status = .stopped
             return
         }
+        // Many surfaces can call `setActive(true)` in quick succession (startup, Canvas, health checks).
+        // Avoid spawning multiple concurrent "start" tasks that can thrash launchd and flap the port.
+        switch self.status {
+        case .starting, .running, .attachedExisting:
+            return
+        case .stopped, .failed:
+            break
+        }
         self.status = .starting
         self.logger.debug("gateway start requested")
 
@@ -106,6 +114,9 @@ final class GatewayProcessManager {
         self.lastFailureReason = nil
         self.status = .stopped
         self.logger.info("gateway stop requested")
+        if CommandResolver.connectionModeIsRemote() {
+            return
+        }
         let bundlePath = Bundle.main.bundleURL.path
         Task {
             _ = await GatewayLaunchAgentManager.set(
@@ -140,7 +151,7 @@ final class GatewayProcessManager {
 
     func refreshLog() {
         guard self.logRefreshTask == nil else { return }
-        let path = LogLocator.launchdGatewayLogPath
+        let path = GatewayLaunchAgentManager.launchdGatewayLogPath()
         let limit = self.logLimit
         self.logRefreshTask = Task { [weak self] in
             let log = await Task.detached(priority: .utility) {
@@ -354,7 +365,7 @@ final class GatewayProcessManager {
 
     func clearLog() {
         self.log = ""
-        try? FileManager.default.removeItem(atPath: LogLocator.launchdGatewayLogPath)
+        try? FileManager().removeItem(atPath: GatewayLaunchAgentManager.launchdGatewayLogPath())
         self.logger.debug("gateway log cleared")
     }
 
@@ -367,7 +378,7 @@ final class GatewayProcessManager {
     }
 
     private nonisolated static func readGatewayLog(path: String, limit: Int) -> String {
-        guard FileManager.default.fileExists(atPath: path) else { return "" }
+        guard FileManager().fileExists(atPath: path) else { return "" }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return "" }
         let text = String(data: data, encoding: .utf8) ?? ""
         if text.count <= limit { return text }

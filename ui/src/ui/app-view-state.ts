@@ -12,22 +12,22 @@ import type {
   HealthSnapshot,
   LogEntry,
   LogLevel,
+  NostrProfile,
   PresenceEntry,
   SessionsListResult,
   SkillStatusReport,
   StatusSummary,
 } from "./types";
-import type {
-  ChatQueueItem,
-  CronFormState,
-  DiscordForm,
-  IMessageForm,
-  SlackForm,
-  SignalForm,
-  TelegramForm,
-} from "./ui-types";
+import type { ChatQueueItem, CronFormState } from "./ui-types";
 import type { EventLogEntry } from "./app-events";
 import type { SkillMessage } from "./controllers/skills";
+import type {
+  ExecApprovalsFile,
+  ExecApprovalsSnapshot,
+} from "./controllers/exec-approvals";
+import type { DevicePairingList } from "./controllers/devices";
+import type { ExecApprovalRequest } from "./controllers/exec-approval";
+import type { NostrProfileFormState } from "./views/channels.nostr-profile-form";
 
 export type AppViewState = {
   settings: UiSettings;
@@ -52,6 +52,20 @@ export type AppViewState = {
   chatQueue: ChatQueueItem[];
   nodesLoading: boolean;
   nodes: Array<Record<string, unknown>>;
+  devicesLoading: boolean;
+  devicesError: string | null;
+  devicesList: DevicePairingList | null;
+  execApprovalsLoading: boolean;
+  execApprovalsSaving: boolean;
+  execApprovalsDirty: boolean;
+  execApprovalsSnapshot: ExecApprovalsSnapshot | null;
+  execApprovalsForm: ExecApprovalsFile | null;
+  execApprovalsSelectedAgent: string | null;
+  execApprovalsTarget: "gateway" | "node";
+  execApprovalsTargetNodeId: string | null;
+  execApprovalQueue: ExecApprovalRequest[];
+  execApprovalBusy: boolean;
+  execApprovalError: string | null;
   configLoading: boolean;
   configRaw: string;
   configValid: boolean | null;
@@ -73,25 +87,9 @@ export type AppViewState = {
   whatsappLoginQrDataUrl: string | null;
   whatsappLoginConnected: boolean | null;
   whatsappBusy: boolean;
-  telegramForm: TelegramForm;
-  telegramSaving: boolean;
-  telegramTokenLocked: boolean;
-  telegramConfigStatus: string | null;
-  discordForm: DiscordForm;
-  discordSaving: boolean;
-  discordTokenLocked: boolean;
-  discordConfigStatus: string | null;
-  slackForm: SlackForm;
-  slackSaving: boolean;
-  slackTokenLocked: boolean;
-  slackAppTokenLocked: boolean;
-  slackConfigStatus: string | null;
-  signalForm: SignalForm;
-  signalSaving: boolean;
-  signalConfigStatus: string | null;
-  imessageForm: IMessageForm;
-  imessageSaving: boolean;
-  imessageConfigStatus: string | null;
+  nostrProfileFormState: NostrProfileFormState | null;
+  nostrProfileAccountId: string | null;
+  configFormDirty: boolean;
   presenceLoading: boolean;
   presenceEntries: PresenceEntry[];
   presenceError: string | null;
@@ -145,11 +143,15 @@ export type AppViewState = {
   handleWhatsAppStart: (force: boolean) => Promise<void>;
   handleWhatsAppWait: () => Promise<void>;
   handleWhatsAppLogout: () => Promise<void>;
-  handleTelegramSave: () => Promise<void>;
-  handleDiscordSave: () => Promise<void>;
-  handleSlackSave: () => Promise<void>;
-  handleSignalSave: () => Promise<void>;
-  handleIMessageSave: () => Promise<void>;
+  handleChannelConfigSave: () => Promise<void>;
+  handleChannelConfigReload: () => Promise<void>;
+  handleNostrProfileEdit: (accountId: string, profile: NostrProfile | null) => void;
+  handleNostrProfileCancel: () => void;
+  handleNostrProfileFieldChange: (field: keyof NostrProfile, value: string) => void;
+  handleNostrProfileSave: () => Promise<void>;
+  handleNostrProfileImport: () => Promise<void>;
+  handleNostrProfileToggleAdvanced: () => void;
+  handleExecApprovalDecision: (decision: "allow-once" | "allow-always" | "deny") => Promise<void>;
   handleConfigLoad: () => Promise<void>;
   handleConfigSave: () => Promise<void>;
   handleConfigApply: () => Promise<void>;
@@ -188,10 +190,4 @@ export type AppViewState = {
   handleLogsLevelFilterToggle: (level: LogLevel) => void;
   handleLogsAutoFollowToggle: (next: boolean) => void;
   handleCallDebugMethod: (method: string, params: string) => Promise<void>;
-  handleUpdateDiscordForm: (path: string, value: unknown) => void;
-  handleUpdateSlackForm: (path: string, value: unknown) => void;
-  handleUpdateSignalForm: (path: string, value: unknown) => void;
-  handleUpdateTelegramForm: (path: string, value: unknown) => void;
-  handleUpdateIMessageForm: (path: string, value: unknown) => void;
 };
-

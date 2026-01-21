@@ -9,9 +9,15 @@ read_when:
 
 Manage the Gateway daemon (background service).
 
+Note: `clawdbot service gateway …` is the preferred surface; `daemon` remains
+as a legacy alias for compatibility.
+
 Related:
 - Gateway CLI: [Gateway](/cli/gateway)
 - macOS platform notes: [macOS](/platforms/macos)
 
 Tip: run `clawdbot daemon --help` for platform-specific flags.
 
+Notes:
+- `daemon status` supports `--json` for scripting.
+- `daemon install|uninstall|start|stop|restart` support `--json` for scripting (default output stays human-friendly).

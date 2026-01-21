@@ -45,15 +45,21 @@ async function main() {
     { startGatewayServer },
     { setGatewayWsLogStyle },
     { setVerbose },
+    { consumeGatewaySigusr1RestartAuthorization, isGatewaySigusr1RestartExternallyAllowed },
     { defaultRuntime },
+    { enableConsoleCapture, setConsoleTimestampPrefix },
   ] = await Promise.all([
     import("../config/config.js"),
     import("../gateway/server.js"),
     import("../gateway/ws-logging.js"),
     import("../globals.js"),
+    import("../infra/restart.js"),
     import("../runtime.js"),
+    import("../logging.js"),
   ]);
 
+  enableConsoleCapture();
+  setConsoleTimestampPrefix(true);
   setVerbose(hasFlag(args, "--verbose"));
 
   const wsLogRaw = (hasFlag(args, "--compact") ? "compact" : argValue(args, "--ws-log")) as
@@ -152,6 +158,13 @@ async function main() {
   };
   const onSigusr1 = () => {
     defaultRuntime.log("gateway: signal SIGUSR1 received");
+    const authorized = consumeGatewaySigusr1RestartAuthorization();
+    if (!authorized && !isGatewaySigusr1RestartExternallyAllowed()) {
+      defaultRuntime.log(
+        "gateway: SIGUSR1 restart ignored (not authorized; enable commands.restart or use gateway tool).",
+      );
+      return;
+    }
     request("restart", "SIGUSR1");
   };
 
@@ -178,4 +191,10 @@ async function main() {
   }
 }
 
-void main();
+void main().catch((err) => {
+  console.error(
+    "[clawdbot] Gateway daemon failed:",
+    err instanceof Error ? (err.stack ?? err.message) : err,
+  );
+  process.exit(1);
+});

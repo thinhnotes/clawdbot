@@ -17,10 +17,26 @@ If the file is missing, Clawdbot uses safe-ish defaults (embedded Pi agent + per
 
 > **New to configuration?** Check out the [Configuration Examples](/gateway/configuration-examples) guide for complete examples with detailed explanations!
 
+## Strict config validation
+
+Clawdbot only accepts configurations that fully match the schema.
+Unknown keys, malformed types, or invalid values cause the Gateway to **refuse to start** for safety.
+
+When validation fails:
+- The Gateway does not boot.
+- Only diagnostic commands are allowed (for example: `clawdbot doctor`, `clawdbot logs`, `clawdbot health`, `clawdbot status`, `clawdbot service`, `clawdbot help`).
+- Run `clawdbot doctor` to see the exact issues.
+- Run `clawdbot doctor --fix` (or `--yes`) to apply migrations/repairs.
+
+Doctor never writes changes unless you explicitly opt into `--fix`/`--yes`.
+
 ## Schema + UI hints
 
 The Gateway exposes a JSON Schema representation of the config via `config.schema` for UI editors.
 The Control UI renders a form from this schema, with a **Raw JSON** editor as an escape hatch.
+
+Channel plugins and extensions can register schema + UI hints for their config, so channel settings
+stay schema-driven across apps without hard-coded forms.
 
 Hints (labels, grouping, sensitive fields) ship alongside the schema so clients can render
 better forms without hard-coding config knowledge.
@@ -282,6 +298,48 @@ This effectively sources your shell profile.
 Env var equivalent:
 - `CLAWDBOT_LOAD_SHELL_ENV=1`
 - `CLAWDBOT_SHELL_ENV_TIMEOUT_MS=15000`
+
+### Env var substitution in config
+
+You can reference environment variables directly in any config string value using
+`${VAR_NAME}` syntax. Variables are substituted at config load time, before validation.
+
+```json5
+{
+  models: {
+    providers: {
+      "vercel-gateway": {
+        apiKey: "${VERCEL_GATEWAY_API_KEY}"
+      }
+    }
+  },
+  gateway: {
+    auth: {
+      token: "${CLAWDBOT_GATEWAY_TOKEN}"
+    }
+  }
+}
+```
+
+**Rules:**
+- Only uppercase env var names are matched: `[A-Z_][A-Z0-9_]*`
+- Missing or empty env vars throw an error at config load
+- Escape with `$${VAR}` to output a literal `${VAR}`
+- Works with `$include` (included files also get substitution)
+
+**Inline substitution:**
+
+```json5
+{
+  models: {
+    providers: {
+      custom: {
+        baseUrl: "${CUSTOM_API_BASE}/v1"  // → "https://api.example.com/v1"
+      }
+    }
+  }
+}
+```
 
 ### Auth storage (OAuth + API keys)
 
@@ -633,10 +691,11 @@ Notes:
 - `"open"`: groups bypass allowlists; mention-gating still applies.
 - `"disabled"`: block all group/room messages.
 - `"allowlist"`: only allow groups/rooms that match the configured allowlist.
+- `channels.defaults.groupPolicy` sets the default when a provider’s `groupPolicy` is unset.
 - WhatsApp/Telegram/Signal/iMessage/Microsoft Teams use `groupAllowFrom` (fallback: explicit `allowFrom`).
 - Discord/Slack use channel allowlists (`channels.discord.guilds.*.channels`, `channels.slack.channels`).
 - Group DMs (Discord/Slack) are still controlled by `dm.groupEnabled` + `dm.groupChannels`.
-- Default is `groupPolicy: "allowlist"`; if no allowlist is configured, group messages are blocked.
+- Default is `groupPolicy: "allowlist"` (unless overridden by `channels.defaults.groupPolicy`); if no allowlist is configured, group messages are blocked.
 
 ### Multi-agent routing (`agents.list` + `bindings`)
 
@@ -871,6 +930,7 @@ Notes:
 - `commands.text: false` disables parsing chat messages for commands.
 - `commands.native: "auto"` (default) turns on native commands for Discord/Telegram and leaves Slack off; unsupported channels stay text-only.
 - Set `commands.native: true|false` to force all, or override per channel with `channels.discord.commands.native`, `channels.telegram.commands.native`, `channels.slack.commands.native` (bool or `"auto"`). `false` clears previously registered commands on Discord/Telegram at startup; Slack commands are managed in the Slack app.
+- `channels.telegram.customCommands` adds extra Telegram bot menu entries. Names are normalized; conflicts with native commands are ignored.
 - `commands.bash: true` enables `! <cmd>` to run host shell commands (`/bash <cmd>` also works as an alias). Requires `tools.elevated.enabled` and allowlisting the sender in `tools.elevated.allowFrom.<channel>`.
 - `commands.bashForegroundMs` controls how long bash waits before backgrounding. While a bash job is running, new `! <cmd>` requests are rejected (one at a time).
 - `commands.config: true` enables `/config` (reads/writes `clawdbot.json`).
@@ -902,7 +962,7 @@ Set `web.enabled: false` to keep it off by default.
 
 ### `channels.telegram` (bot transport)
 
-Clawdbot starts Telegram only when a `channels.telegram` config section exists. The bot token is resolved from `TELEGRAM_BOT_TOKEN` or `channels.telegram.botToken`.
+Clawdbot starts Telegram only when a `channels.telegram` config section exists. The bot token is resolved from `channels.telegram.botToken` (or `channels.telegram.tokenFile`), with `TELEGRAM_BOT_TOKEN` as a fallback for the default account.
 Set `channels.telegram.enabled: false` to disable automatic startup.
 Multi-account support lives under `channels.telegram.accounts` (see the multi-account section above). Env tokens only apply to the default account.
 Set `channels.telegram.configWrites: false` to block Telegram-initiated config writes (including supergroup ID migrations and `/config set|unset`).
@@ -929,6 +989,10 @@ Set `channels.telegram.configWrites: false` to block Telegram-initiated config w
           }
         }
       },
+      customCommands: [
+        { command: "backup", description: "Git backup" },
+        { command: "generate", description: "Create an image" }
+      ],
       historyLimit: 50,                     // include last N group messages as context (0 disables)
       replyToMode: "first",                 // off | first | all
       streamMode: "partial",               // off | partial | block (draft streaming; separate from block streaming)
@@ -938,6 +1002,7 @@ Set `channels.telegram.configWrites: false` to block Telegram-initiated config w
         breakPreference: "paragraph"       // paragraph | newline | sentence
       },
       actions: { reactions: true, sendMessage: true }, // tool action gates (false disables)
+      reactionNotifications: "own",   // off | own | all
       mediaMaxMb: 5,
       retry: {                             // outbound retry policy
         attempts: 3,
@@ -1030,7 +1095,7 @@ Multi-account support lives under `channels.discord.accounts` (see the multi-acc
 }
 ```
 
-Clawdbot starts Discord only when a `channels.discord` config section exists. The token is resolved from `DISCORD_BOT_TOKEN` or `channels.discord.token` (unless `channels.discord.enabled` is `false`). Use `user:<id>` (DM) or `channel:<id>` (guild channel) when specifying delivery targets for cron/CLI commands; bare numeric IDs are ambiguous and rejected.
+Clawdbot starts Discord only when a `channels.discord` config section exists. The token is resolved from `channels.discord.token`, with `DISCORD_BOT_TOKEN` as a fallback for the default account (unless `channels.discord.enabled` is `false`). Use `user:<id>` (DM) or `channel:<id>` (guild channel) when specifying delivery targets for cron/CLI commands; bare numeric IDs are ambiguous and rejected.
 Guild slugs are lowercase with spaces replaced by `-`; channel keys use the slugged channel name (no leading `#`). Prefer guild ids as keys to avoid rename ambiguity.
 Bot-authored messages are ignored by default. Enable with `channels.discord.allowBots` (own messages are still filtered to prevent self-reply loops).
 Reaction notification modes:
@@ -1158,6 +1223,7 @@ Clawdbot spawns `imsg rpc` (JSON-RPC over stdio). No daemon or port required.
       enabled: true,
       cliPath: "imsg",
       dbPath: "~/Library/Messages/chat.db",
+      remoteHost: "user@gateway-host", // SCP for remote attachments when using SSH wrapper
       dmPolicy: "pairing", // pairing | allowlist | open | disabled
       allowFrom: ["+15555550123", "user@example.com", "chat_id:123"],
       historyLimit: 50,    // include last N group messages as context (0 disables)
@@ -1177,11 +1243,12 @@ Notes:
 - The first send will prompt for Messages automation permission.
 - Prefer `chat_id:<id>` targets. Use `imsg chats --limit 20` to list chats.
 - `channels.imessage.cliPath` can point to a wrapper script (e.g. `ssh` to another Mac that runs `imsg rpc`); use SSH keys to avoid password prompts.
+- For remote SSH wrappers, set `channels.imessage.remoteHost` to fetch attachments via SCP when `includeAttachments` is enabled.
 
 Example wrapper:
 ```bash
 #!/usr/bin/env bash
-exec ssh -T mac-mini "imsg rpc"
+exec ssh -T gateway-host imsg "$@"
 ```
 
 ### `agents.defaults.workspace`
@@ -1266,7 +1333,9 @@ See [Messages](/concepts/messages) for queueing, sessions, and streaming context
 `responsePrefix` is applied to **all outbound replies** (tool summaries, block
 streaming, final replies) across channels unless already present.
 
-If `messages.responsePrefix` is unset, no prefix is applied by default.
+If `messages.responsePrefix` is unset, no prefix is applied by default. WhatsApp self-chat
+replies are the exception: they default to `[{identity.name}]` when set, otherwise
+`[clawdbot]`, so same-phone conversations stay legible.
 Set it to `"auto"` to derive `[{identity.name}]` for the routed agent (when set).
 
 #### Template variables
@@ -1345,7 +1414,7 @@ Each `agents.defaults.models` entry can include:
 - `alias` (optional model shortcut, e.g. `/opus`).
 - `params` (optional provider-specific API params passed through to the model request).
 
-`params` is also applied to streaming runs (embedded agent + compaction). Supported keys today: `temperature`, `maxTokens`. These merge with call-time options; caller-supplied values win. `temperature` is an advanced knob—leave unset unless you know the model’s defaults and need a change.
+`params` is also applied to streaming runs (embedded agent + compaction). Supported keys today: `temperature`, `maxTokens`, `cacheControlTtl` (`"5m"` or `"1h"`, Anthropic API + OpenRouter Anthropic models only; ignored for Anthropic OAuth/Claude Code tokens). These merge with call-time options; caller-supplied values win. `temperature` is an advanced knob—leave unset unless you know the model’s defaults and need a change. Anthropic API defaults to `"1h"` unless you override (`cacheControlTtl: "5m"`). Clawdbot includes the `extended-cache-ttl-2025-04-11` beta flag for Anthropic API; keep it if you override provider headers.
 
 Example:
 
@@ -1690,10 +1759,10 @@ of `every`, keep `HEARTBEAT.md` tiny, and/or choose a cheaper `model`.
 - `backgroundMs`: time before auto-background (ms, default 10000)
 - `timeoutSec`: auto-kill after this runtime (seconds, default 1800)
 - `cleanupMs`: how long to keep finished sessions in memory (ms, default 1800000)
+- `notifyOnExit`: enqueue a system event + request heartbeat when backgrounded exec exits (default true)
 - `applyPatch.enabled`: enable experimental `apply_patch` (OpenAI/OpenAI Codex only; default false)
 - `applyPatch.allowModels`: optional allowlist of model ids (e.g. `gpt-5.2` or `openai/gpt-5.2`)
-Note: `applyPatch` is only under `tools.exec` (no `tools.bash` alias).
-Legacy: `tools.bash` is still accepted as an alias.
+Note: `applyPatch` is only under `tools.exec`.
 
 `tools.web` configures web search + fetch tools:
 - `tools.web.search.enabled` (default: true when key is present)
@@ -1701,15 +1770,78 @@ Legacy: `tools.bash` is still accepted as an alias.
 - `tools.web.search.maxResults` (1–10, default 5)
 - `tools.web.search.timeoutSeconds` (default 30)
 - `tools.web.search.cacheTtlMinutes` (default 15)
-- `tools.web.fetch.enabled` (default false; sandboxed sessions auto-enable unless set to false)
+- `tools.web.fetch.enabled` (default true)
 - `tools.web.fetch.maxChars` (default 50000)
 - `tools.web.fetch.timeoutSeconds` (default 30)
 - `tools.web.fetch.cacheTtlMinutes` (default 15)
+- `tools.web.fetch.maxRedirects` (default 3)
 - `tools.web.fetch.userAgent` (optional override)
+- `tools.web.fetch.readability` (default true; disable to use basic HTML cleanup only)
+- `tools.web.fetch.firecrawl.enabled` (default true when an API key is set)
+- `tools.web.fetch.firecrawl.apiKey` (optional; defaults to `FIRECRAWL_API_KEY`)
+- `tools.web.fetch.firecrawl.baseUrl` (default https://api.firecrawl.dev)
+- `tools.web.fetch.firecrawl.onlyMainContent` (default true)
+- `tools.web.fetch.firecrawl.maxAgeMs` (optional)
+- `tools.web.fetch.firecrawl.timeoutSeconds` (optional)
+
+`tools.media` configures inbound media understanding (image/audio/video):
+- `tools.media.models`: shared model list (capability-tagged; used after per-cap lists).
+- `tools.media.concurrency`: max concurrent capability runs (default 2).
+- `tools.media.image` / `tools.media.audio` / `tools.media.video`:
+  - `enabled`: opt-out switch (default true when models are configured).
+  - `prompt`: optional prompt override (image/video append a `maxChars` hint automatically).
+  - `maxChars`: max output characters (default 500 for image/video; unset for audio).
+  - `maxBytes`: max media size to send (defaults: image 10MB, audio 20MB, video 50MB).
+  - `timeoutSeconds`: request timeout (defaults: image 60s, audio 60s, video 120s).
+  - `language`: optional audio hint.
+  - `attachments`: attachment policy (`mode`, `maxAttachments`, `prefer`).
+  - `scope`: optional gating (first match wins) with `match.channel`, `match.chatType`, or `match.keyPrefix`.
+  - `models`: ordered list of model entries; failures or oversize media fall back to the next entry.
+- Each `models[]` entry:
+  - Provider entry (`type: "provider"` or omitted):
+    - `provider`: API provider id (`openai`, `anthropic`, `google`/`gemini`, `groq`, etc).
+    - `model`: model id override (required for image; defaults to `whisper-1`/`whisper-large-v3-turbo` for audio providers, and `gemini-3-flash-preview` for video).
+    - `profile` / `preferredProfile`: auth profile selection.
+  - CLI entry (`type: "cli"`):
+    - `command`: executable to run.
+    - `args`: templated args (supports `{{MediaPath}}`, `{{Prompt}}`, `{{MaxChars}}`, etc).
+  - `capabilities`: optional list (`image`, `audio`, `video`) to gate a shared entry. Defaults when omitted: `openai`/`anthropic`/`minimax` → image, `google` → image+audio+video, `groq` → audio.
+  - `prompt`, `maxChars`, `maxBytes`, `timeoutSeconds`, `language` can be overridden per entry.
+
+If no models are configured (or `enabled: false`), understanding is skipped; the model still receives the original attachments.
+
+Provider auth follows the standard model auth order (auth profiles, env vars like `OPENAI_API_KEY`/`GROQ_API_KEY`/`GEMINI_API_KEY`, or `models.providers.*.apiKey`).
+
+Example:
+```json5
+{
+  tools: {
+    media: {
+      audio: {
+        enabled: true,
+        maxBytes: 20971520,
+        scope: {
+          default: "deny",
+          rules: [{ action: "allow", match: { chatType: "direct" } }]
+        },
+        models: [
+          { provider: "openai", model: "whisper-1" },
+          { type: "cli", command: "whisper", args: ["--model", "base", "{{MediaPath}}"] }
+        ]
+      },
+      video: {
+        enabled: true,
+        maxBytes: 52428800,
+        models: [{ provider: "google", model: "gemini-3-flash-preview" }]
+      }
+    }
+  }
+}
+```
 
 `agents.defaults.subagents` configures sub-agent defaults:
 - `model`: default model for spawned sub-agents (string or `{ primary, fallbacks }`). If omitted, sub-agents inherit the caller’s model unless overridden per agent or per call.
-- `maxConcurrent`: max concurrent sub-agent runs (default 1)
+- `maxConcurrent`: max concurrent sub-agent runs (default 8)
 - `archiveAfterMinutes`: auto-archive sub-agent sessions after N minutes (default 60; set `0` to disable)
 - Per-subagent tool policy: `tools.subagents.tools.allow` / `tools.subagents.tools.deny` (deny wins)
 
@@ -1843,7 +1975,7 @@ Notes:
 
 `agents.defaults.maxConcurrent` sets the maximum number of embedded agent runs that can
 execute in parallel across sessions. Each session is still serialized (one run
-per session key at a time). Default: 1.
+per session key at a time). Default: 4.
 
 ### `agents.defaults.sandbox`
 
@@ -1871,6 +2003,9 @@ cross-session isolation. Use `scope: "session"` for per-session isolation.
 
 Legacy: `perSession` is still supported (`true` → `scope: "session"`,
 `false` → `scope: "shared"`).
+
+`setupCommand` runs **once** after the container is created (inside the container via `sh -lc`).
+For package installs, ensure network egress, a writable root FS, and a root user.
 
 ```json5
 {
@@ -2117,6 +2252,49 @@ Notes:
 - Model ref: `moonshot/kimi-k2-0905-preview`.
 - Use `https://api.moonshot.cn/v1` if you need the China endpoint.
 
+### Kimi Code
+
+Use Kimi Code's dedicated OpenAI-compatible endpoint (separate from Moonshot):
+
+```json5
+{
+  env: { KIMICODE_API_KEY: "sk-..." },
+  agents: {
+    defaults: {
+      model: { primary: "kimi-code/kimi-for-coding" },
+      models: { "kimi-code/kimi-for-coding": { alias: "Kimi Code" } }
+    }
+  },
+  models: {
+    mode: "merge",
+    providers: {
+      "kimi-code": {
+        baseUrl: "https://api.kimi.com/coding/v1",
+        apiKey: "${KIMICODE_API_KEY}",
+        api: "openai-completions",
+        models: [
+          {
+            id: "kimi-for-coding",
+            name: "Kimi For Coding",
+            reasoning: true,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 262144,
+            maxTokens: 32768,
+            headers: { "User-Agent": "KimiCLI/0.77" },
+            compat: { supportsDeveloperRole: false }
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Notes:
+- Set `KIMICODE_API_KEY` in the environment or use `clawdbot onboard --auth-choice kimi-code-api-key`.
+- Model ref: `kimi-code/kimi-for-coding`.
+
 ### Synthetic (Anthropic-compatible)
 
 Use Synthetic's Anthropic-compatible endpoint:
@@ -2255,13 +2433,26 @@ Notes:
 
 ### `session`
 
-Controls session scoping, idle expiry, reset triggers, and where the session store is written.
+Controls session scoping, reset policy, reset triggers, and where the session store is written.
 
 ```json5
 {
   session: {
     scope: "per-sender",
-    idleMinutes: 60,
+    dmScope: "main",
+    identityLinks: {
+      alice: ["telegram:123456789", "discord:987654321012345678"]
+    },
+    reset: {
+      mode: "daily",
+      atHour: 4,
+      idleMinutes: 60
+    },
+    resetByType: {
+      thread: { mode: "daily", atHour: 4 },
+      dm: { mode: "idle", idleMinutes: 240 },
+      group: { mode: "idle", idleMinutes: 120 }
+    },
     resetTriggers: ["/new", "/reset"],
     // Default is already per-agent under ~/.clawdbot/agents/<agentId>/sessions/sessions.json
     // You can override with {agentId} templating:
@@ -2272,12 +2463,12 @@ Controls session scoping, idle expiry, reset triggers, and where the session sto
       // Max ping-pong reply turns between requester/target (0–5).
       maxPingPongTurns: 5
     },
-        sendPolicy: {
-          rules: [
+    sendPolicy: {
+      rules: [
         { action: "deny", match: { channel: "discord", chatType: "group" } }
-          ],
-          default: "allow"
-        }
+      ],
+      default: "allow"
+    }
   }
 }
 ```
@@ -2285,6 +2476,19 @@ Controls session scoping, idle expiry, reset triggers, and where the session sto
 Fields:
 - `mainKey`: direct-chat bucket key (default: `"main"`). Useful when you want to “rename” the primary DM thread without changing `agentId`.
   - Sandbox note: `agents.defaults.sandbox.mode: "non-main"` uses this key to detect the main session. Any session key that does not match `mainKey` (groups/channels) is sandboxed.
+- `dmScope`: how DM sessions are grouped (default: `"main"`).
+  - `main`: all DMs share the main session for continuity.
+  - `per-peer`: isolate DMs by sender id across channels.
+  - `per-channel-peer`: isolate DMs per channel + sender (recommended for multi-user inboxes).
+- `identityLinks`: map canonical ids to provider-prefixed peers so the same person shares a DM session across channels when using `per-peer` or `per-channel-peer`.
+  - Example: `alice: ["telegram:123456789", "discord:987654321012345678"]`.
+- `reset`: primary reset policy. Defaults to daily resets at 4:00 AM local time on the gateway host.
+  - `mode`: `daily` or `idle` (default: `daily` when `reset` is present).
+  - `atHour`: local hour (0-23) for the daily reset boundary.
+  - `idleMinutes`: sliding idle window in minutes. When daily + idle are both configured, whichever expires first wins.
+- `resetByType`: per-session overrides for `dm`, `group`, and `thread`.
+  - If you only set legacy `session.idleMinutes` without any `reset`/`resetByType`, Clawdbot stays in idle-only mode for backward compatibility.
+- `heartbeatIdleMinutes`: optional idle override for heartbeat checks (daily reset still applies when enabled).
 - `agentToAgent.maxPingPongTurns`: max reply-back turns between requester/target (0–5, default 5).
 - `sendPolicy.default`: `allow` or `deny` fallback when no rule matches.
 - `sendPolicy.rules[]`: match by `channel`, `chatType` (`direct|group|room`), or `keyPrefix` (e.g. `cron:`). First deny wins; otherwise allow.
@@ -2376,10 +2580,10 @@ Example:
 }
 ```
 
-### `browser` (clawd-managed Chrome)
+### `browser` (clawd-managed browser)
 
-Clawdbot can start a **dedicated, isolated** Chrome/Chromium instance for clawd and expose a small loopback control server.
-Profiles can point at a **remote** Chrome via `profiles.<name>.cdpUrl`. Remote
+Clawdbot can start a **dedicated, isolated** Chrome/Brave/Edge/Chromium instance for clawd and expose a small loopback control server.
+Profiles can point at a **remote** Chromium-based browser via `profiles.<name>.cdpUrl`. Remote
 profiles are attach-only (start/stop/reset are disabled).
 
 `browser.cdpUrl` remains for legacy single-profile configs and as the base
@@ -2391,6 +2595,7 @@ Defaults:
 - CDP URL: `http://127.0.0.1:18792` (control URL + 1, legacy single-profile)
 - profile color: `#FF4500` (lobster-orange)
 - Note: the control server is started by the running gateway (Clawdbot.app menubar, or `clawdbot gateway`).
+- Auto-detect order: default browser if Chromium-based; otherwise Chrome → Brave → Edge → Chromium → Chrome Canary.
 
 ```json5
 {
@@ -2408,11 +2613,14 @@ Defaults:
     // Advanced:
     // headless: false,
     // noSandbox: false,
-    // executablePath: "/usr/bin/chromium",
+    // executablePath: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
     // attachOnly: false, // set true when tunneling a remote CDP to localhost
+    // snapshotDefaults: { mode: "efficient" }, // tool/CLI default snapshot preset
   }
 }
 ```
+
+Note: `browser.snapshotDefaults` only affects Clawdbot's browser tool + CLI. Direct HTTP clients must pass `mode` explicitly.
 
 ### `ui` (Appearance)
 
@@ -2465,6 +2673,7 @@ Notes:
 - `clawdbot gateway` refuses to start unless `gateway.mode` is set to `local` (or you pass the override flag).
 - `gateway.port` controls the single multiplexed port used for WebSocket + HTTP (control UI, hooks, A2UI).
 - OpenAI Chat Completions endpoint: **disabled by default**; enable with `gateway.http.endpoints.chatCompletions.enabled: true`.
+- OpenResponses endpoint: **disabled by default**; enable with `gateway.http.endpoints.responses.enabled: true`.
 - Precedence: `--port` > `CLAWDBOT_GATEWAY_PORT` > `gateway.port` > default `18789`.
 - Non-loopback binds (`lan`/`tailnet`/`auto`) require auth. Use `gateway.auth.token` (or `CLAWDBOT_GATEWAY_TOKEN`).
 - The onboarding wizard generates a gateway token by default (even on loopback).
@@ -2472,7 +2681,7 @@ Notes:
 
 Auth and Tailscale:
 - `gateway.auth.mode` sets the handshake requirements (`token` or `password`).
-- `gateway.auth.token` stores the shared token for token auth (used by the CLI on the same machine).
+- `gateway.auth.token` stores the shared token for token auth (used by the CLI on the same machine and as the bootstrap credential for device pairing).
 - When `gateway.auth.mode` is set, only that method is accepted (plus optional Tailscale headers).
 - `gateway.auth.password` can be set here, or via `CLAWDBOT_GATEWAY_PASSWORD` (recommended).
 - `gateway.auth.allowTailscale` allows Tailscale Serve identity headers
@@ -2481,6 +2690,9 @@ Auth and Tailscale:
   `true`, Serve requests do not need a token/password; set `false` to require
   explicit credentials. Defaults to `true` when `tailscale.mode = "serve"` and
   auth mode is not `password`.
+- After pairing, the Gateway issues **device tokens** scoped to the device role + scopes.
+  These are returned in `hello-ok.auth.deviceToken`; clients should persist and reuse them
+  instead of the shared token. Rotate/revoke via `device.token.rotate`/`device.token.revoke`.
 - `gateway.tailscale.mode: "serve"` uses Tailscale Serve (tailnet only, loopback bind).
 - `gateway.tailscale.mode: "funnel"` exposes the dashboard publicly; requires auth.
 - `gateway.tailscale.resetOnExit` resets Serve/Funnel config on shutdown.
@@ -2489,6 +2701,7 @@ Remote client defaults (CLI):
 - `gateway.remote.url` sets the default Gateway WebSocket URL for CLI calls when `gateway.mode = "remote"`.
 - `gateway.remote.token` supplies the token for remote calls (leave unset for no auth).
 - `gateway.remote.password` supplies the password for remote calls (leave unset for no auth).
+- `gateway.remote.tlsFingerprint` pins the gateway TLS cert fingerprint (sha256).
 
 macOS app behavior:
 - Clawdbot.app watches `~/.clawdbot/clawdbot.json` and switches modes live when `gateway.mode` or `gateway.remote.url` changes.
@@ -2502,11 +2715,35 @@ macOS app behavior:
     remote: {
       url: "ws://gateway.tailnet:18789",
       token: "your-token",
-      password: "your-password"
+      password: "your-password",
+      tlsFingerprint: "sha256:ab12cd34..."
     }
   }
 }
 ```
+
+### `gateway.nodes` (Node command allowlist)
+
+The Gateway enforces a per-platform command allowlist for `node.invoke`. Nodes must both
+**declare** a command and have it **allowed** by the Gateway to run it.
+
+Use this section to extend or deny commands:
+
+```json5
+{
+  gateway: {
+    nodes: {
+      allowCommands: ["custom.vendor.command"], // extra commands beyond defaults
+      denyCommands: ["sms.send"]      // block a command even if declared
+    }
+  }
+}
+```
+
+Notes:
+- `allowCommands` extends the built-in per-platform defaults.
+- `denyCommands` always wins (even if the node claims the command).
+- `node.invoke` rejects commands that are not declared by the node.
 
 ### `gateway.reload` (Config hot reload)
 
@@ -2629,7 +2866,7 @@ Mapping notes:
 - If there is no prior delivery route, set `channel` + `to` explicitly (required for Telegram/Discord/Slack/Signal/iMessage/MS Teams).
 - `model` overrides the LLM for this hook run (`provider/model` or alias; must be allowed if `agents.defaults.models` is set).
 
-Gmail helper config (used by `clawdbot hooks gmail setup` / `run`):
+Gmail helper config (used by `clawdbot webhooks gmail setup` / `run`):
 
 ```json5
 {
@@ -2726,19 +2963,36 @@ Bind modes:
 - `loopback`: `127.0.0.1` (local only)
 - `auto`: prefer tailnet IP if present, else `lan`
 
+TLS:
+- `bridge.tls.enabled`: enable TLS for bridge connections (TLS-only when enabled).
+- `bridge.tls.autoGenerate`: generate a self-signed cert when no cert/key are present (default: true).
+- `bridge.tls.certPath` / `bridge.tls.keyPath`: PEM paths for the bridge certificate + private key.
+- `bridge.tls.caPath`: optional PEM CA bundle (custom roots or future mTLS).
+
+When TLS is enabled, the Gateway advertises `bridgeTls=1` and `bridgeTlsSha256` in discovery TXT
+records so nodes can pin the certificate. Manual connections use trust-on-first-use if no
+fingerprint is stored yet.
+Auto-generated certs require `openssl` on PATH; if generation fails, the bridge will not start.
+
 ```json5
 {
   bridge: {
     enabled: true,
     port: 18790,
-    bind: "tailnet"
+    bind: "tailnet",
+    tls: {
+      enabled: true,
+      // Uses ~/.clawdbot/bridge/tls/bridge-{cert,key}.pem when omitted.
+      // certPath: "~/.clawdbot/bridge/tls/bridge-cert.pem",
+      // keyPath: "~/.clawdbot/bridge/tls/bridge-key.pem"
+    }
   }
 }
 ```
 
 ### `discovery.wideArea` (Wide-Area Bonjour / unicast DNS‑SD)
 
-When enabled, the Gateway writes a unicast DNS-SD zone for `_clawdbot-bridge._tcp` under `~/.clawdbot/dns/` using the standard discovery domain `clawdbot.internal.`
+When enabled, the Gateway writes a unicast DNS-SD zone for `_clawdbot-gw._tcp` under `~/.clawdbot/dns/` using the standard discovery domain `clawdbot.internal.`
 
 To make iOS/Android discover across networks (Vienna ⇄ London), pair this with:
 - a DNS server on the gateway host serving `clawdbot.internal.` (CoreDNS is recommended)
@@ -2758,7 +3012,7 @@ clawdbot dns setup --apply
 
 ## Template variables
 
-Template placeholders are expanded in `tools.audio.transcription.args` (and any future templated argument fields).
+Template placeholders are expanded in `tools.media.*.models[].args` and `tools.media.models[].args` (and any future templated argument fields).
 
 | Variable | Description |
 |----------|-------------|
@@ -2774,6 +3028,8 @@ Template placeholders are expanded in `tools.audio.transcription.args` (and any 
 | `{{MediaPath}}` | Local media path (if downloaded) |
 | `{{MediaType}}` | Media type (image/audio/document/…) |
 | `{{Transcript}}` | Audio transcript (when enabled) |
+| `{{Prompt}}` | Resolved media prompt for CLI entries |
+| `{{MaxChars}}` | Resolved max output chars for CLI entries |
 | `{{ChatType}}` | `"direct"` or `"group"` |
 | `{{GroupSubject}}` | Group subject (best effort) |
 | `{{GroupMembers}}` | Group members preview (best effort) |

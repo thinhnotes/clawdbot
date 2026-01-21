@@ -658,6 +658,10 @@
       "destination": "/reference/templates/AGENTS"
     },
     {
+      "source": "/templates/BOOT",
+      "destination": "/reference/templates/BOOT"
+    },
+    {
       "source": "/templates/BOOTSTRAP",
       "destination": "/reference/templates/BOOTSTRAP"
     },
@@ -734,6 +738,22 @@
       "destination": "/start/wizard"
     },
     {
+      "source": "/install/node",
+      "destination": "/install#nodejs--npm-path-sanity"
+    },
+    {
+      "source": "/install/node/",
+      "destination": "/install#nodejs--npm-path-sanity"
+    },
+    {
+      "source": "/start/faq",
+      "destination": "/help"
+    },
+    {
+      "source": "/start/faq/",
+      "destination": "/help"
+    },
+    {
       "source": "/oauth",
       "destination": "/concepts/oauth"
     },
@@ -752,7 +772,6 @@
           "start/wizard",
           "start/setup",
           "start/pairing",
-          "start/faq",
           "start/clawd",
           "start/showcase",
           "start/hubs",
@@ -761,11 +780,20 @@
         ]
       },
       {
+        "group": "Help",
+        "pages": [
+          "help/index",
+          "help/troubleshooting",
+          "help/faq"
+        ]
+      },
+      {
         "group": "Install & Updates",
         "pages": [
           "install/index",
           "install/installer",
           "install/updating",
+          "install/development-channels",
           "install/uninstall",
           "install/ansible",
           "install/nix",
@@ -792,14 +820,17 @@
           "cli/health",
           "cli/sessions",
           "cli/channels",
+          "cli/directory",
           "cli/skills",
           "cli/plugins",
           "cli/memory",
           "cli/models",
           "cli/logs",
           "cli/nodes",
+          "cli/approvals",
           "cli/gateway",
           "cli/daemon",
+          "cli/service",
           "cli/tui",
           "cli/voicecall",
           "cli/wake",
@@ -870,7 +901,6 @@
           "gateway/heartbeat",
           "gateway/doctor",
           "gateway/logging",
-          "logging",
           "gateway/security",
           "gateway/sandbox-vs-tool-policy-vs-elevated",
           "gateway/sandboxing",
@@ -907,6 +937,7 @@
           "channels/msteams",
           "channels/matrix",
           "channels/zalo",
+          "channels/zalouser",
           "broadcast-groups",
           "channels/troubleshooting",
           "channels/location"
@@ -932,6 +963,8 @@
       {
         "group": "Automation & Hooks",
         "pages": [
+          "hooks",
+          "hooks/soul-evil",
           "automation/auth-monitoring",
           "automation/webhook",
           "automation/gmail-pubsub",
@@ -945,6 +978,7 @@
           "tools",
           "plugin",
           "plugins/voice-call",
+          "plugins/zalouser",
           "tools/exec",
           "tools/web",
           "tools/apply-patch",
@@ -1024,6 +1058,7 @@
           "reference/RELEASING",
           "reference/AGENTS.default",
           "reference/templates/AGENTS",
+          "reference/templates/BOOT",
           "reference/templates/BOOTSTRAP",
           "reference/templates/HEARTBEAT",
           "reference/templates/IDENTITY",

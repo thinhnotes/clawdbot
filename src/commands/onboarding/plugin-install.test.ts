@@ -68,6 +68,9 @@ describe("ensureOnboardingPluginInstalled", () => {
     expect(result.installed).toBe(true);
     expect(result.cfg.plugins?.entries?.zalo?.enabled).toBe(true);
     expect(result.cfg.plugins?.allow).toContain("zalo");
+    expect(result.cfg.plugins?.installs?.zalo?.source).toBe("npm");
+    expect(result.cfg.plugins?.installs?.zalo?.spec).toBe("@clawdbot/zalo");
+    expect(result.cfg.plugins?.installs?.zalo?.installPath).toBe("/tmp/zalo");
     expect(installPluginFromNpmSpec).toHaveBeenCalledWith(
       expect.objectContaining({ spec: "@clawdbot/zalo" }),
     );
@@ -97,6 +100,52 @@ describe("ensureOnboardingPluginInstalled", () => {
     expect(result.installed).toBe(true);
     expect(result.cfg.plugins?.load?.paths).toContain(expectedPath);
     expect(result.cfg.plugins?.entries?.zalo?.enabled).toBe(true);
+  });
+
+  it("defaults to local on dev channel when local path exists", async () => {
+    const runtime = makeRuntime();
+    const select = vi.fn(async () => "skip") as WizardPrompter["select"];
+    const prompter = makePrompter({ select });
+    const cfg: ClawdbotConfig = { update: { channel: "dev" } };
+    vi.mocked(fs.existsSync).mockImplementation((value) => {
+      const raw = String(value);
+      return (
+        raw.endsWith(`${path.sep}.git`) || raw.endsWith(`${path.sep}extensions${path.sep}zalo`)
+      );
+    });
+
+    await ensureOnboardingPluginInstalled({
+      cfg,
+      entry: baseEntry,
+      prompter,
+      runtime,
+    });
+
+    const firstCall = select.mock.calls[0]?.[0];
+    expect(firstCall?.initialValue).toBe("local");
+  });
+
+  it("defaults to npm on beta channel even when local path exists", async () => {
+    const runtime = makeRuntime();
+    const select = vi.fn(async () => "skip") as WizardPrompter["select"];
+    const prompter = makePrompter({ select });
+    const cfg: ClawdbotConfig = { update: { channel: "beta" } };
+    vi.mocked(fs.existsSync).mockImplementation((value) => {
+      const raw = String(value);
+      return (
+        raw.endsWith(`${path.sep}.git`) || raw.endsWith(`${path.sep}extensions${path.sep}zalo`)
+      );
+    });
+
+    await ensureOnboardingPluginInstalled({
+      cfg,
+      entry: baseEntry,
+      prompter,
+      runtime,
+    });
+
+    const firstCall = select.mock.calls[0]?.[0];
+    expect(firstCall?.initialValue).toBe("npm");
   });
 
   it("falls back to local path after npm install failure", async () => {

@@ -1,10 +1,8 @@
-import type { MatrixClient } from "matrix-js-sdk";
+import type { MatrixClient } from "matrix-bot-sdk";
 
-import { chunkMarkdownText } from "../../../../../src/auto-reply/chunk.js";
-import type { ReplyPayload } from "../../../../../src/auto-reply/types.js";
-import { danger } from "../../../../../src/globals.js";
-import type { RuntimeEnv } from "../../../../../src/runtime.js";
+import type { ReplyPayload, RuntimeEnv } from "clawdbot/plugin-sdk";
 import { sendMessageMatrix } from "../send.js";
+import { getMatrixRuntime } from "../../runtime.js";
 
 export async function deliverMatrixReplies(params: {
   replies: ReplyPayload[];
@@ -15,11 +13,22 @@ export async function deliverMatrixReplies(params: {
   replyToMode: "off" | "first" | "all";
   threadId?: string;
 }): Promise<void> {
+  const core = getMatrixRuntime();
+  const logVerbose = (message: string) => {
+    if (core.logging.shouldLogVerbose()) {
+      params.runtime.log?.(message);
+    }
+  };
   const chunkLimit = Math.min(params.textLimit, 4000);
   let hasReplied = false;
   for (const reply of params.replies) {
-    if (!reply?.text && !reply?.mediaUrl && !(reply?.mediaUrls?.length ?? 0)) {
-      params.runtime.error?.(danger("matrix reply missing text/media"));
+    const hasMedia = Boolean(reply?.mediaUrl) || (reply?.mediaUrls?.length ?? 0) > 0;
+    if (!reply?.text && !hasMedia) {
+      if (reply?.audioAsVoice) {
+        logVerbose("matrix reply has audioAsVoice without media/text; skipping");
+        continue;
+      }
+      params.runtime.error?.("matrix reply missing text/media");
       continue;
     }
     const replyToIdRaw = reply.replyToId?.trim();
@@ -34,7 +43,7 @@ export async function deliverMatrixReplies(params: {
       Boolean(id) && (params.replyToMode === "all" || !hasReplied);
 
     if (mediaList.length === 0) {
-      for (const chunk of chunkMarkdownText(reply.text ?? "", chunkLimit)) {
+      for (const chunk of core.channel.text.chunkMarkdownText(reply.text ?? "", chunkLimit)) {
         const trimmed = chunk.trim();
         if (!trimmed) continue;
         await sendMessageMatrix(params.roomId, trimmed, {
@@ -57,6 +66,7 @@ export async function deliverMatrixReplies(params: {
         mediaUrl,
         replyToId: shouldIncludeReply(replyToId) ? replyToId : undefined,
         threadId: params.threadId,
+        audioAsVoice: reply.audioAsVoice,
       });
       if (shouldIncludeReply(replyToId)) {
         hasReplied = true;

@@ -26,6 +26,11 @@ clawdbot models scan
 When provider usage snapshots are available, the OAuth/token status section includes
 provider usage headers.
 
+Notes:
+- `models set <model-or-alias>` accepts `provider/model` or an alias.
+- Model refs are parsed by splitting on the **first** `/`. If the model ID includes `/` (OpenRouter-style), include the provider prefix (example: `openrouter/moonshotai/kimi-k2`).
+- If you omit the provider, Clawdbot treats the input as an alias or a model for the **default provider** (only works when there is no `/` in the model ID).
+
 ## Aliases + fallbacks
 
 ```bash
@@ -43,3 +48,7 @@ clawdbot models auth paste-token
 ```
 `models auth login` runs a provider plugin’s auth flow (OAuth/API key). Use
 `clawdbot plugins list` to see which providers are installed.
+
+Notes:
+- `setup-token` runs `claude setup-token` on the current machine (requires the Claude Code CLI).
+- `paste-token` accepts a token string generated elsewhere.

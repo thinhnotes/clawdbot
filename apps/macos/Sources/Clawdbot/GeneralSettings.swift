@@ -83,6 +83,8 @@ struct GeneralSettings: View {
                         subtitle: "Allow the agent to capture a photo or short video via the built-in camera.",
                         binding: self.$cameraEnabled)
 
+                    SystemRunSettingsView()
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Location Access")
                             .font(.body)
@@ -92,7 +94,8 @@ struct GeneralSettings: View {
                             Text("While Using").tag(ClawdbotLocationMode.whileUsing.rawValue)
                             Text("Always").tag(ClawdbotLocationMode.always.rawValue)
                         }
-                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .pickerStyle(.menu)
 
                         Toggle("Precise Location", isOn: self.$locationPreciseEnabled)
                             .disabled(self.locationMode == .off)
@@ -713,7 +716,7 @@ extension GeneralSettings {
     }
 
     private func applyDiscoveredGateway(_ gateway: GatewayDiscoveryModel.DiscoveredGateway) {
-        MacNodeModeCoordinator.shared.setPreferredBridgeStableID(gateway.stableID)
+        MacNodeModeCoordinator.shared.setPreferredGatewayStableID(gateway.stableID)
 
         let host = gateway.tailnetDns ?? gateway.lanHost
         guard let host else { return }

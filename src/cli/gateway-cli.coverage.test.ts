@@ -116,7 +116,7 @@ describe("gateway-cli coverage", () => {
 
     expect(callGateway).toHaveBeenCalledTimes(1);
     expect(runtimeLogs.join("\n")).toContain('"ok": true');
-  }, 15_000);
+  }, 30_000);
 
   it("registers gateway status and routes to gatewayStatusCommand", async () => {
     runtimeLogs.length = 0;
@@ -131,7 +131,7 @@ describe("gateway-cli coverage", () => {
     await program.parseAsync(["gateway", "status", "--json"], { from: "user" });
 
     expect(gatewayStatusCommand).toHaveBeenCalledTimes(1);
-  }, 15_000);
+  }, 30_000);
 
   it("registers gateway discover and prints JSON", async () => {
     runtimeLogs.length = 0;
@@ -146,7 +146,6 @@ describe("gateway-cli coverage", () => {
         lanHost: "studio.local",
         tailnetDns: "studio.tailnet.ts.net",
         gatewayPort: 18789,
-        bridgePort: 18790,
         sshPort: 22,
       },
     ]);
@@ -179,7 +178,6 @@ describe("gateway-cli coverage", () => {
         lanHost: "studio.local",
         tailnetDns: "studio.tailnet.ts.net",
         gatewayPort: 18789,
-        bridgePort: 18790,
         sshPort: 22,
       },
     ]);

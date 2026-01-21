@@ -14,11 +14,18 @@ export type EmbeddedSubscribeLogger = {
   warn: (message: string) => void;
 };
 
+export type ToolErrorSummary = {
+  toolName: string;
+  meta?: string;
+  error?: string;
+};
+
 export type EmbeddedPiSubscribeState = {
   assistantTexts: string[];
   toolMetas: Array<{ toolName?: string; meta?: string }>;
   toolMetaById: Map<string, string | undefined>;
   toolSummaryById: Set<string>;
+  lastToolError?: ToolErrorSummary;
 
   blockReplyBreak: "text_end" | "message_end";
   reasoningMode: ReasoningLevel;
@@ -32,6 +39,10 @@ export type EmbeddedPiSubscribeState = {
   lastStreamedAssistant?: string;
   lastStreamedReasoning?: string;
   lastBlockReplyText?: string;
+  assistantMessageIndex: number;
+  lastAssistantTextMessageIndex: number;
+  lastAssistantTextNormalized?: string;
+  lastAssistantTextTrimmed?: string;
   assistantTextBaseline: number;
   suppressBlockChunks: boolean;
   lastReasoningSent?: string;
@@ -56,7 +67,9 @@ export type EmbeddedPiSubscribeContext = {
   blockChunker: EmbeddedBlockChunker | null;
 
   shouldEmitToolResult: () => boolean;
+  shouldEmitToolOutput: () => boolean;
   emitToolSummary: (toolName?: string, meta?: string) => void;
+  emitToolOutput: (toolName?: string, meta?: string, output?: string) => void;
   stripBlockTags: (
     text: string,
     state: { thinking: boolean; final: boolean; inlineCode?: InlineCodeState },

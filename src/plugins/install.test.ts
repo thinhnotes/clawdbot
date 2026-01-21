@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import JSZip from "jszip";
+import { afterEach, describe, expect, it } from "vitest";
 
 const tempDirs: string[] = [];
 
@@ -76,22 +77,6 @@ function packToArchive({
   return dest;
 }
 
-async function withStateDir<T>(stateDir: string, fn: () => Promise<T>) {
-  const prev = process.env.CLAWDBOT_STATE_DIR;
-  process.env.CLAWDBOT_STATE_DIR = stateDir;
-  vi.resetModules();
-  try {
-    return await fn();
-  } finally {
-    if (prev === undefined) {
-      delete process.env.CLAWDBOT_STATE_DIR;
-    } else {
-      process.env.CLAWDBOT_STATE_DIR = prev;
-    }
-    vi.resetModules();
-  }
-}
-
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     try {
@@ -125,10 +110,9 @@ describe("installPluginFromArchive", () => {
       outName: "plugin.tgz",
     });
 
-    const result = await withStateDir(stateDir, async () => {
-      const { installPluginFromArchive } = await import("./install.js");
-      return await installPluginFromArchive({ archivePath });
-    });
+    const extensionsDir = path.join(stateDir, "extensions");
+    const { installPluginFromArchive } = await import("./install.js");
+    const result = await installPluginFromArchive({ archivePath, extensionsDir });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.pluginId).toBe("voice-call");
@@ -159,17 +143,105 @@ describe("installPluginFromArchive", () => {
       outName: "plugin.tgz",
     });
 
-    const { first, second } = await withStateDir(stateDir, async () => {
-      const { installPluginFromArchive } = await import("./install.js");
-      const first = await installPluginFromArchive({ archivePath });
-      const second = await installPluginFromArchive({ archivePath });
-      return { first, second };
-    });
+    const extensionsDir = path.join(stateDir, "extensions");
+    const { installPluginFromArchive } = await import("./install.js");
+    const first = await installPluginFromArchive({ archivePath, extensionsDir });
+    const second = await installPluginFromArchive({ archivePath, extensionsDir });
 
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(false);
     if (second.ok) return;
     expect(second.error).toContain("already exists");
+  });
+
+  it("installs from a zip archive", async () => {
+    const stateDir = makeTempDir();
+    const workDir = makeTempDir();
+    const archivePath = path.join(workDir, "plugin.zip");
+
+    const zip = new JSZip();
+    zip.file(
+      "package/package.json",
+      JSON.stringify({
+        name: "@clawdbot/zipper",
+        version: "0.0.1",
+        clawdbot: { extensions: ["./dist/index.js"] },
+      }),
+    );
+    zip.file("package/dist/index.js", "export {};");
+    const buffer = await zip.generateAsync({ type: "nodebuffer" });
+    fs.writeFileSync(archivePath, buffer);
+
+    const extensionsDir = path.join(stateDir, "extensions");
+    const { installPluginFromArchive } = await import("./install.js");
+    const result = await installPluginFromArchive({ archivePath, extensionsDir });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.pluginId).toBe("zipper");
+    expect(result.targetDir).toBe(path.join(stateDir, "extensions", "zipper"));
+    expect(fs.existsSync(path.join(result.targetDir, "package.json"))).toBe(true);
+    expect(fs.existsSync(path.join(result.targetDir, "dist", "index.js"))).toBe(true);
+  });
+
+  it("allows updates when mode is update", async () => {
+    const stateDir = makeTempDir();
+    const workDir = makeTempDir();
+    const pkgDir = path.join(workDir, "package");
+    fs.mkdirSync(path.join(pkgDir, "dist"), { recursive: true });
+    fs.writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@clawdbot/voice-call",
+        version: "0.0.1",
+        clawdbot: { extensions: ["./dist/index.js"] },
+      }),
+      "utf-8",
+    );
+    fs.writeFileSync(path.join(pkgDir, "dist", "index.js"), "export {};", "utf-8");
+
+    const archiveV1 = packToArchive({
+      pkgDir,
+      outDir: workDir,
+      outName: "plugin-v1.tgz",
+    });
+
+    const archiveV2 = (() => {
+      fs.writeFileSync(
+        path.join(pkgDir, "package.json"),
+        JSON.stringify({
+          name: "@clawdbot/voice-call",
+          version: "0.0.2",
+          clawdbot: { extensions: ["./dist/index.js"] },
+        }),
+        "utf-8",
+      );
+      return packToArchive({
+        pkgDir,
+        outDir: workDir,
+        outName: "plugin-v2.tgz",
+      });
+    })();
+
+    const extensionsDir = path.join(stateDir, "extensions");
+    const { installPluginFromArchive } = await import("./install.js");
+    const first = await installPluginFromArchive({
+      archivePath: archiveV1,
+      extensionsDir,
+    });
+    const second = await installPluginFromArchive({
+      archivePath: archiveV2,
+      extensionsDir,
+      mode: "update",
+    });
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(second.targetDir, "package.json"), "utf-8"),
+    ) as { version?: string };
+    expect(manifest.version).toBe("0.0.2");
   });
 
   it("rejects packages without clawdbot.extensions", async () => {
@@ -189,10 +261,9 @@ describe("installPluginFromArchive", () => {
       outName: "bad.tgz",
     });
 
-    const result = await withStateDir(stateDir, async () => {
-      const { installPluginFromArchive } = await import("./install.js");
-      return await installPluginFromArchive({ archivePath });
-    });
+    const extensionsDir = path.join(stateDir, "extensions");
+    const { installPluginFromArchive } = await import("./install.js");
+    const result = await installPluginFromArchive({ archivePath, extensionsDir });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).toContain("clawdbot.extensions");

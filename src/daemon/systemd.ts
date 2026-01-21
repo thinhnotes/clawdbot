@@ -23,6 +23,7 @@ import {
 } from "./systemd-unit.js";
 
 const execFileAsync = promisify(execFile);
+const toPosixPath = (value: string) => value.replace(/\\/g, "/");
 
 const formatLine = (label: string, value: string) => {
   const rich = isRich();
@@ -33,8 +34,8 @@ function resolveSystemdUnitPathForName(
   env: Record<string, string | undefined>,
   name: string,
 ): string {
-  const home = resolveHomeDir(env);
-  return path.join(home, ".config", "systemd", "user", `${name}.service`);
+  const home = toPosixPath(resolveHomeDir(env));
+  return path.posix.join(home, ".config", "systemd", "user", `${name}.service`);
 }
 
 function resolveSystemdServiceName(env: Record<string, string | undefined>): string {
@@ -185,23 +186,27 @@ export async function installSystemdService({
   programArguments,
   workingDirectory,
   environment,
+  description,
 }: {
   env: Record<string, string | undefined>;
   stdout: NodeJS.WritableStream;
   programArguments: string[];
   workingDirectory?: string;
   environment?: Record<string, string | undefined>;
+  description?: string;
 }): Promise<{ unitPath: string }> {
   await assertSystemdAvailable();
 
   const unitPath = resolveSystemdUnitPath(env);
   await fs.mkdir(path.dirname(unitPath), { recursive: true });
-  const description = formatGatewayServiceDescription({
-    profile: env.CLAWDBOT_PROFILE,
-    version: environment?.CLAWDBOT_SERVICE_VERSION ?? env.CLAWDBOT_SERVICE_VERSION,
-  });
+  const serviceDescription =
+    description ??
+    formatGatewayServiceDescription({
+      profile: env.CLAWDBOT_PROFILE,
+      version: environment?.CLAWDBOT_SERVICE_VERSION ?? env.CLAWDBOT_SERVICE_VERSION,
+    });
   const unit = buildSystemdUnit({
-    description,
+    description: serviceDescription,
     programArguments,
     workingDirectory,
     environment,

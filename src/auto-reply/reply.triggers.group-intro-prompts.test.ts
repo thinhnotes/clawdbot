@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
@@ -63,6 +64,7 @@ vi.mock("../web/session.js", () => webMocks);
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   return withTempHomeBase(
     async (home) => {
+      await mkdir(join(home, ".clawdbot", "agents", "main", "sessions"), { recursive: true });
       vi.mocked(runEmbeddedPiAgent).mockClear();
       vi.mocked(abortEmbeddedPiRun).mockClear();
       return await fn(home);
@@ -109,7 +111,7 @@ describe("group intro prompts", () => {
       await getReplyFromConfig(
         {
           Body: "status update",
-          From: "group:dev",
+          From: "discord:group:dev",
           To: "+1888",
           ChatType: "group",
           GroupSubject: "Release Squad",
@@ -172,7 +174,7 @@ describe("group intro prompts", () => {
       await getReplyFromConfig(
         {
           Body: "ping",
-          From: "group:tg",
+          From: "telegram:group:tg",
           To: "+1777",
           ChatType: "group",
           GroupSubject: "Dev Chat",

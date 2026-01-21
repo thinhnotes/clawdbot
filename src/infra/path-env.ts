@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isTruthyEnvValue } from "./env.js";
 
 import { resolveBrewPathDirs } from "./brew.js";
 
@@ -55,7 +56,7 @@ function candidateBinDirs(opts: EnsureClawdbotPathOpts): string[] {
 
   const candidates: string[] = [];
 
-  // Bundled macOS app: `clawdbot` lives in the Relay dir (process.execPath).
+  // Bundled macOS app: `clawdbot` lives next to the executable (process.execPath).
   try {
     const execDir = path.dirname(execPath);
     const siblingClawdbot = path.join(execDir, "clawdbot");
@@ -94,7 +95,7 @@ function candidateBinDirs(opts: EnsureClawdbotPathOpts): string[] {
  * under launchd/minimal environments (and inside the macOS app bundle).
  */
 export function ensureClawdbotCliOnPath(opts: EnsureClawdbotPathOpts = {}) {
-  if (process.env.CLAWDBOT_PATH_BOOTSTRAPPED === "1") return;
+  if (isTruthyEnvValue(process.env.CLAWDBOT_PATH_BOOTSTRAPPED)) return;
   process.env.CLAWDBOT_PATH_BOOTSTRAPPED = "1";
 
   const existing = opts.pathEnv ?? process.env.PATH ?? "";

@@ -34,14 +34,60 @@ clawdbot onboard --anthropic-api-key "$ANTHROPIC_API_KEY"
 }
 ```
 
+## Prompt caching (Anthropic API)
+
+Clawdbot enables **1-hour prompt caching by default** for Anthropic API keys.
+This is **API-only**; Claude Code CLI OAuth ignores TTL settings.
+
+To override the TTL per model, set `cacheControlTtl` in the model `params`:
+
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "anthropic/claude-opus-4-5": {
+          params: { cacheControlTtl: "5m" } // or "1h"
+        }
+      }
+    }
+  }
+}
+```
+
+Clawdbot includes the `extended-cache-ttl-2025-04-11` beta flag for Anthropic API
+requests; keep it if you override provider headers (see [/gateway/configuration](/gateway/configuration)).
+
 ## Option B: Claude Code CLI (setup-token or OAuth)
 
 **Best for:** using your Claude subscription or existing Claude Code CLI login.
 
+### Where to get a setup-token
+
+Setup-tokens are created by the **Claude Code CLI**, not the Anthropic Console. You can run this on **any machine**:
+
+```bash
+claude setup-token
+```
+
+Paste the token into Clawdbot (wizard: **Anthropic token (paste setup-token)**), or let Clawdbot run the command locally:
+
+```bash
+clawdbot onboard --auth-choice setup-token
+# or
+clawdbot models auth setup-token --provider anthropic
+```
+
+If you generated the token on a different machine, paste it:
+
+```bash
+clawdbot models auth paste-token --provider anthropic
+```
+
 ### CLI setup
 
 ```bash
-# Run setup-token on the gateway host (wizard can run it for you)
+# Run setup-token locally (wizard can run it for you)
 clawdbot onboard --auth-choice setup-token
 
 # Reuse Claude Code CLI OAuth credentials if already logged in
@@ -58,7 +104,7 @@ clawdbot onboard --auth-choice claude-cli
 
 ## Notes
 
-- The wizard can run `claude setup-token` on the gateway host and store the token.
+- The wizard can run `claude setup-token` locally and store the token, or you can paste a token generated elsewhere.
 - Clawdbot writes `auth.profiles["anthropic:claude-cli"].mode` as `"oauth"` so the profile
   accepts both OAuth and setup-token credentials. Older configs using `"token"` are
   auto-migrated on load.

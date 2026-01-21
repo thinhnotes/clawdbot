@@ -1,4 +1,6 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { ChannelPlugin } from "../channels/plugins/types.js";
+import type { PluginRegistry } from "../plugins/registry.js";
 import {
   connectOk,
   installGatewayTestHooks,
@@ -10,11 +12,147 @@ const loadConfigHelpers = async () => await import("../config/config.js");
 
 installGatewayTestHooks();
 
+const registryState = vi.hoisted(() => ({
+  registry: {
+    plugins: [],
+    tools: [],
+    channels: [],
+    providers: [],
+    gatewayHandlers: {},
+    httpHandlers: [],
+    cliRegistrars: [],
+    services: [],
+    diagnostics: [],
+  } as PluginRegistry,
+}));
+
+vi.mock("./server-plugins.js", async () => {
+  const { setActivePluginRegistry } = await import("../plugins/runtime.js");
+  return {
+    loadGatewayPlugins: (params: { baseMethods: string[] }) => {
+      setActivePluginRegistry(registryState.registry);
+      return {
+        pluginRegistry: registryState.registry,
+        gatewayMethods: params.baseMethods ?? [],
+      };
+    },
+  };
+});
+
+const createRegistry = (channels: PluginRegistry["channels"]): PluginRegistry => ({
+  plugins: [],
+  tools: [],
+  channels,
+  providers: [],
+  gatewayHandlers: {},
+  httpHandlers: [],
+  cliRegistrars: [],
+  services: [],
+  diagnostics: [],
+});
+
+const createStubChannelPlugin = (params: {
+  id: ChannelPlugin["id"];
+  label: string;
+  summary?: Record<string, unknown>;
+  logoutCleared?: boolean;
+}): ChannelPlugin => ({
+  id: params.id,
+  meta: {
+    id: params.id,
+    label: params.label,
+    selectionLabel: params.label,
+    docsPath: `/channels/${params.id}`,
+    blurb: "test stub.",
+  },
+  capabilities: { chatTypes: ["direct"] },
+  config: {
+    listAccountIds: () => ["default"],
+    resolveAccount: () => ({}),
+    isConfigured: async () => false,
+  },
+  status: {
+    buildChannelSummary: async () => ({
+      configured: false,
+      ...params.summary,
+    }),
+  },
+  gateway: {
+    logoutAccount: async () => ({
+      cleared: params.logoutCleared ?? false,
+      envToken: false,
+    }),
+  },
+});
+
+const telegramPlugin: ChannelPlugin = {
+  ...createStubChannelPlugin({
+    id: "telegram",
+    label: "Telegram",
+    summary: { tokenSource: "none", lastProbeAt: null },
+    logoutCleared: true,
+  }),
+  gateway: {
+    logoutAccount: async ({ cfg }) => {
+      const { writeConfigFile } = await import("../config/config.js");
+      const nextTelegram = cfg.channels?.telegram ? { ...cfg.channels.telegram } : {};
+      delete nextTelegram.botToken;
+      await writeConfigFile({
+        ...cfg,
+        channels: {
+          ...cfg.channels,
+          telegram: nextTelegram,
+        },
+      });
+      return { cleared: true, envToken: false, loggedOut: true };
+    },
+  },
+};
+
+const defaultRegistry = createRegistry([
+  {
+    pluginId: "whatsapp",
+    source: "test",
+    plugin: createStubChannelPlugin({ id: "whatsapp", label: "WhatsApp" }),
+  },
+  {
+    pluginId: "telegram",
+    source: "test",
+    plugin: telegramPlugin,
+  },
+  {
+    pluginId: "signal",
+    source: "test",
+    plugin: createStubChannelPlugin({
+      id: "signal",
+      label: "Signal",
+      summary: { lastProbeAt: null },
+    }),
+  },
+]);
+
+const servers: Array<Awaited<ReturnType<typeof startServerWithClient>>> = [];
+
+afterEach(async () => {
+  for (const { server, ws } of servers) {
+    try {
+      ws.close();
+      await server.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  servers.length = 0;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+});
+
 describe("gateway server channels", () => {
   test("channels.status returns snapshot without probe", async () => {
-    const prevToken = process.env.TELEGRAM_BOT_TOKEN;
-    delete process.env.TELEGRAM_BOT_TOKEN;
-    const { server, ws } = await startServerWithClient();
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
+    registryState.registry = defaultRegistry;
+    const result = await startServerWithClient();
+    servers.push(result);
+    const { ws } = result;
     await connectOk(ws);
 
     const res = await rpcReq<{
@@ -40,18 +178,13 @@ describe("gateway server channels", () => {
     expect(signal?.configured).toBe(false);
     expect(signal?.probe).toBeUndefined();
     expect(signal?.lastProbeAt).toBeNull();
-
-    ws.close();
-    await server.close();
-    if (prevToken === undefined) {
-      delete process.env.TELEGRAM_BOT_TOKEN;
-    } else {
-      process.env.TELEGRAM_BOT_TOKEN = prevToken;
-    }
   });
 
   test("channels.logout reports no session when missing", async () => {
-    const { server, ws } = await startServerWithClient();
+    registryState.registry = defaultRegistry;
+    const result = await startServerWithClient();
+    servers.push(result);
+    const { ws } = result;
     await connectOk(ws);
 
     const res = await rpcReq<{ cleared?: boolean; channel?: string }>(ws, "channels.logout", {
@@ -60,14 +193,11 @@ describe("gateway server channels", () => {
     expect(res.ok).toBe(true);
     expect(res.payload?.channel).toBe("whatsapp");
     expect(res.payload?.cleared).toBe(false);
-
-    ws.close();
-    await server.close();
   });
 
   test("channels.logout clears telegram bot token from config", async () => {
-    const prevToken = process.env.TELEGRAM_BOT_TOKEN;
-    delete process.env.TELEGRAM_BOT_TOKEN;
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
+    registryState.registry = defaultRegistry;
     const { readConfigFileSnapshot, writeConfigFile } = await loadConfigHelpers();
     await writeConfigFile({
       channels: {
@@ -78,7 +208,9 @@ describe("gateway server channels", () => {
       },
     });
 
-    const { server, ws } = await startServerWithClient();
+    const result = await startServerWithClient();
+    servers.push(result);
+    const { ws } = result;
     await connectOk(ws);
 
     const res = await rpcReq<{
@@ -95,13 +227,5 @@ describe("gateway server channels", () => {
     expect(snap.valid).toBe(true);
     expect(snap.config?.channels?.telegram?.botToken).toBeUndefined();
     expect(snap.config?.channels?.telegram?.groups?.["*"]?.requireMention).toBe(false);
-
-    ws.close();
-    await server.close();
-    if (prevToken === undefined) {
-      delete process.env.TELEGRAM_BOT_TOKEN;
-    } else {
-      process.env.TELEGRAM_BOT_TOKEN = prevToken;
-    }
   });
 });

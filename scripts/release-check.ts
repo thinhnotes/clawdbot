@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S node --import tsx
 
 import { execSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
@@ -10,7 +10,6 @@ type PackResult = { files?: PackFile[] };
 const requiredPaths = [
   "dist/discord/send.js",
   "dist/hooks/gmail.js",
-  "dist/msteams/send.js",
   "dist/whatsapp/normalize.js",
 ];
 const forbiddenPrefixes = ["dist/Clawdbot.app/"];
@@ -68,6 +67,7 @@ function checkPluginVersions() {
     for (const item of mismatches) {
       console.error(`  - ${item}`);
     }
+    console.error("release-check: run `pnpm plugins:sync` to align plugin versions.");
     process.exit(1);
   }
 }

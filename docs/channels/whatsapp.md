@@ -82,15 +82,13 @@ When the wizard asks for your personal WhatsApp number, enter the phone you will
     "selfChatMode": true,
     "dmPolicy": "allowlist",
     "allowFrom": ["+15551234567"]
-  },
-  "messages": {
-    "responsePrefix": "[clawdbot]"
   }
 }
 ```
 
-Tip: set `messages.responsePrefix` explicitly if you want a consistent bot prefix
-on outbound replies.
+Self-chat replies default to `[{identity.name}]` when set (otherwise `[clawdbot]`)
+if `messages.responsePrefix` is unset. Set it explicitly to customize or disable
+the prefix (use `""` to remove it).
 
 ### Number sourcing tips
 - **Local eSIM** from your country's mobile carrier (most reliable)
@@ -204,9 +202,9 @@ The wizard uses it to set your **allowlist/owner** so your own DMs are permitted
   - `always`: always triggers.
 - `/activation mention|always` is owner-only and must be sent as a standalone message.
 - Owner = `channels.whatsapp.allowFrom` (or self E.164 if unset).
-- **History injection**:
-  - Recent messages (default 50) inserted under:
-    `[Chat messages since your last reply - for context]`
+- **History injection** (pending-only):
+  - Recent *unprocessed* messages (default 50) inserted under:
+    `[Chat messages since your last reply - for context]` (messages already in the session are not re-injected)
   - Current message under:
     `[Current message - respond to this]`
   - Sender suffix appended: `[from: Name (+E164)]`
@@ -288,6 +286,11 @@ WhatsApp can automatically send emoji reactions to incoming messages immediately
     - CLI: `clawdbot message send --media <mp4> --gif-playback`
     - Gateway: `send` params include `gifPlayback: true`
 
+## Voice notes (PTT audio)
+WhatsApp sends audio as **voice notes** (PTT bubble).
+- Best results: OGG/Opus. Clawdbot rewrites `audio/ogg` to `audio/ogg; codecs=opus`.
+- `[[audio_as_voice]]` is ignored for WhatsApp (audio already ships as voice note).
+
 ## Media limits + optimization
 - Default outbound cap: 5 MB (per media item).
 - Override: `agents.defaults.mediaMaxMb`.
@@ -310,7 +313,7 @@ WhatsApp can automatically send emoji reactions to incoming messages immediately
 ## Config quick map
 - `channels.whatsapp.dmPolicy` (DM policy: pairing/allowlist/open/disabled).
 - `channels.whatsapp.selfChatMode` (same-phone setup; bot uses your personal WhatsApp number).
-- `channels.whatsapp.allowFrom` (DM allowlist).
+- `channels.whatsapp.allowFrom` (DM allowlist). WhatsApp uses E.164 phone numbers (no usernames).
 - `channels.whatsapp.mediaMaxMb` (inbound media save cap).
 - `channels.whatsapp.ackReaction` (auto-reaction on message receipt: `{emoji, direct, group}`).
 - `channels.whatsapp.accounts.<accountId>.*` (per-account settings + optional `authDir`).

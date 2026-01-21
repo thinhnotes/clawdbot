@@ -7,18 +7,19 @@ import { resolveModelRefFromString } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR, ensureAgentWorkspace } from "../../agents/workspace.js";
 import { type ClawdbotConfig, loadConfig } from "../../config/config.js";
-import { logVerbose } from "../../globals.js";
 import { defaultRuntime } from "../../runtime.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import type { MsgContext } from "../templating.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
-import { hasAudioTranscriptionConfig, isAudio, transcribeInboundAudio } from "../transcription.js";
+import { applyMediaUnderstanding } from "../../media-understanding/apply.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveDefaultModel } from "./directive-handling.js";
 import { resolveReplyDirectives } from "./get-reply-directives.js";
 import { handleInlineActions } from "./get-reply-inline-actions.js";
 import { runPreparedReply } from "./get-reply-run.js";
+import { finalizeInboundContext } from "./inbound-context.js";
 import { initSessionState } from "./session.js";
+import { applyResetModelOverride } from "./session-reset-model.js";
 import { stageSandboxMedia } from "./stage-sandbox-media.js";
 import { createTypingController } from "./typing.js";
 
@@ -28,8 +29,11 @@ export async function getReplyFromConfig(
   configOverride?: ClawdbotConfig,
 ): Promise<ReplyPayload | ReplyPayload[] | undefined> {
   const cfg = configOverride ?? loadConfig();
+  const targetSessionKey =
+    ctx.CommandSource === "native" ? ctx.CommandTargetSessionKey?.trim() : undefined;
+  const agentSessionKey = targetSessionKey || ctx.SessionKey;
   const agentId = resolveSessionAgentId({
-    sessionKey: ctx.SessionKey,
+    sessionKey: agentSessionKey,
     config: cfg,
   });
   const agentCfg = cfg.agents?.defaults;
@@ -75,35 +79,35 @@ export async function getReplyFromConfig(
   });
   opts?.onTypingController?.(typing);
 
-  let transcribedText: string | undefined;
-  if (hasAudioTranscriptionConfig(cfg) && isAudio(ctx.MediaType)) {
-    const transcribed = await transcribeInboundAudio(cfg, ctx, defaultRuntime);
-    if (transcribed?.text) {
-      transcribedText = transcribed.text;
-      ctx.Body = transcribed.text;
-      ctx.Transcript = transcribed.text;
-      logVerbose("Replaced Body with audio transcript for reply flow");
-    }
-  }
+  const finalized = finalizeInboundContext(ctx);
 
-  const commandAuthorized = ctx.CommandAuthorized ?? true;
+  await applyMediaUnderstanding({
+    ctx: finalized,
+    cfg,
+    agentDir,
+    activeModel: { provider, model },
+  });
+
+  const commandAuthorized = finalized.CommandAuthorized;
   resolveCommandAuthorization({
-    ctx,
+    ctx: finalized,
     cfg,
     commandAuthorized,
   });
   const sessionState = await initSessionState({
-    ctx,
+    ctx: finalized,
     cfg,
     commandAuthorized,
   });
   let {
     sessionCtx,
     sessionEntry,
+    previousSessionEntry,
     sessionStore,
     sessionKey,
     sessionId,
     isNewSession,
+    resetTriggered,
     systemSent,
     abortedLastRun,
     storePath,
@@ -111,13 +115,30 @@ export async function getReplyFromConfig(
     groupResolution,
     isGroup,
     triggerBodyNormalized,
+    bodyStripped,
   } = sessionState;
 
+  await applyResetModelOverride({
+    cfg,
+    resetTriggered,
+    bodyStripped,
+    sessionCtx,
+    ctx: finalized,
+    sessionEntry,
+    sessionStore,
+    sessionKey,
+    storePath,
+    defaultProvider,
+    defaultModel,
+    aliasIndex,
+  });
+
   const directiveResult = await resolveReplyDirectives({
-    ctx,
+    ctx: finalized,
     cfg,
     agentId,
     agentDir,
+    workspaceDir,
     agentCfg,
     sessionCtx,
     sessionEntry,
@@ -136,6 +157,7 @@ export async function getReplyFromConfig(
     model,
     typing,
     opts,
+    skillFilter: opts?.skillFilter,
   });
   if (directiveResult.kind === "reply") {
     return directiveResult.reply;
@@ -145,6 +167,7 @@ export async function getReplyFromConfig(
     commandSource,
     command,
     allowTextCommands,
+    skillCommands,
     directives,
     cleanedBody,
     elevatedEnabled,
@@ -155,6 +178,7 @@ export async function getReplyFromConfig(
     resolvedVerboseLevel,
     resolvedReasoningLevel,
     resolvedElevatedLevel,
+    execOverrides,
     blockStreamingEnabled,
     blockReplyChunking,
     resolvedBlockStreamingBreak,
@@ -175,7 +199,9 @@ export async function getReplyFromConfig(
     sessionCtx,
     cfg,
     agentId,
+    agentDir,
     sessionEntry,
+    previousSessionEntry,
     sessionStore,
     sessionKey,
     storePath,
@@ -187,6 +213,7 @@ export async function getReplyFromConfig(
     allowTextCommands,
     inlineStatusRequested,
     command,
+    skillCommands,
     directives,
     cleanedBody,
     elevatedEnabled,
@@ -203,6 +230,7 @@ export async function getReplyFromConfig(
     contextTokens,
     directiveAck,
     abortedLastRun,
+    skillFilter: opts?.skillFilter,
   });
   if (inlineActionResult.kind === "reply") {
     return inlineActionResult.reply;
@@ -236,6 +264,7 @@ export async function getReplyFromConfig(
     resolvedVerboseLevel,
     resolvedReasoningLevel,
     resolvedElevatedLevel,
+    execOverrides,
     elevatedEnabled,
     elevatedAllowed,
     blockStreamingEnabled,
@@ -246,12 +275,13 @@ export async function getReplyFromConfig(
     model,
     perMessageQueueMode,
     perMessageQueueOptions,
-    transcribedText,
     typing,
     opts,
+    defaultProvider,
     defaultModel,
     timeoutMs,
     isNewSession,
+    resetTriggered,
     systemSent,
     sessionEntry,
     sessionStore,

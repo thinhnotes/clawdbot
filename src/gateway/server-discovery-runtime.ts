@@ -1,6 +1,6 @@
 import { startGatewayBonjourAdvertiser } from "../infra/bonjour.js";
 import { pickPrimaryTailnetIPv4, pickPrimaryTailnetIPv6 } from "../infra/tailnet.js";
-import { WIDE_AREA_DISCOVERY_DOMAIN, writeWideAreaBridgeZone } from "../infra/widearea-dns.js";
+import { WIDE_AREA_DISCOVERY_DOMAIN, writeWideAreaGatewayZone } from "../infra/widearea-dns.js";
 import {
   formatBonjourInstanceName,
   resolveBonjourCliPath,
@@ -10,13 +10,18 @@ import {
 export async function startGatewayDiscovery(params: {
   machineDisplayName: string;
   port: number;
-  bridgePort?: number;
+  gatewayTls?: { enabled: boolean; fingerprintSha256?: string };
   canvasPort?: number;
   wideAreaDiscoveryEnabled: boolean;
   logDiscovery: { info: (msg: string) => void; warn: (msg: string) => void };
 }) {
   let bonjourStop: (() => Promise<void>) | null = null;
-  const tailnetDns = await resolveTailnetDnsHint();
+  const bonjourEnabled =
+    process.env.CLAWDBOT_DISABLE_BONJOUR !== "1" &&
+    process.env.NODE_ENV !== "test" &&
+    !process.env.VITEST;
+  const needsTailnetDns = bonjourEnabled || params.wideAreaDiscoveryEnabled;
+  const tailnetDns = needsTailnetDns ? await resolveTailnetDnsHint() : undefined;
   const sshPortEnv = process.env.CLAWDBOT_SSH_PORT?.trim();
   const sshPortParsed = sshPortEnv ? Number.parseInt(sshPortEnv, 10) : NaN;
   const sshPort = Number.isFinite(sshPortParsed) && sshPortParsed > 0 ? sshPortParsed : undefined;
@@ -25,7 +30,8 @@ export async function startGatewayDiscovery(params: {
     const bonjour = await startGatewayBonjourAdvertiser({
       instanceName: formatBonjourInstanceName(params.machineDisplayName),
       gatewayPort: params.port,
-      bridgePort: params.bridgePort,
+      gatewayTlsEnabled: params.gatewayTls?.enabled ?? false,
+      gatewayTlsFingerprintSha256: params.gatewayTls?.fingerprintSha256,
       canvasPort: params.canvasPort,
       sshPort,
       tailnetDns,
@@ -36,7 +42,7 @@ export async function startGatewayDiscovery(params: {
     params.logDiscovery.warn(`bonjour advertising failed: ${String(err)}`);
   }
 
-  if (params.wideAreaDiscoveryEnabled && params.bridgePort) {
+  if (params.wideAreaDiscoveryEnabled) {
     const tailnetIPv4 = pickPrimaryTailnetIPv4();
     if (!tailnetIPv4) {
       params.logDiscovery.warn(
@@ -45,12 +51,13 @@ export async function startGatewayDiscovery(params: {
     } else {
       try {
         const tailnetIPv6 = pickPrimaryTailnetIPv6();
-        const result = await writeWideAreaBridgeZone({
-          bridgePort: params.bridgePort,
+        const result = await writeWideAreaGatewayZone({
           gatewayPort: params.port,
           displayName: formatBonjourInstanceName(params.machineDisplayName),
           tailnetIPv4,
           tailnetIPv6: tailnetIPv6 ?? undefined,
+          gatewayTlsEnabled: params.gatewayTls?.enabled ?? false,
+          gatewayTlsFingerprintSha256: params.gatewayTls?.fingerprintSha256,
           tailnetDns,
           sshPort,
           cliPath: resolveBonjourCliPath(),

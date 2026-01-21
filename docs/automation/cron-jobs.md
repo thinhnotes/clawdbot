@@ -78,6 +78,7 @@ Isolated jobs run a dedicated agent turn in session `cron:<jobId>`.
 
 Key behaviors:
 - Prompt is prefixed with `[cron:<jobId> <job name>]` for traceability.
+- Each run starts a **fresh session id** (no prior conversation carry-over).
 - A summary is posted to the main session (prefix `Cron`, configurable).
 - `wakeMode: "now"` triggers an immediate heartbeat after posting the summary.
 - If `payload.deliver: true`, output is delivered to a channel; otherwise it stays internal.
@@ -100,7 +101,9 @@ Common `agentTurn` fields:
 - `bestEffortDeliver`: avoid failing the job if delivery fails.
 
 Isolation options (only for `session=isolated`):
-- `postToMainPrefix` (CLI: `--post-prefix`): prefix for the summary system event in main.
+- `postToMainPrefix` (CLI: `--post-prefix`): prefix for the system event in main.
+- `postToMainMode`: `summary` (default) or `full`.
+- `postToMainMaxChars`: max chars when `postToMainMode=full` (default 8000).
 
 ### Model and thinking overrides
 Isolated jobs (`agentTurn`) can override the model and thinking level:
@@ -123,6 +126,11 @@ Isolated jobs can deliver output to a channel. The job payload can specify:
 
 If `channel` or `to` is omitted, cron can fall back to the main session’s “last route”
 (the last place the agent replied).
+
+Delivery notes:
+- If `to` is set, cron auto-delivers the agent’s final output even if `deliver` is omitted.
+- Use `deliver: true` when you want last-route delivery without an explicit `to`.
+- Use `deliver: false` to keep output internal even if a `to` is present.
 
 Target format reminders:
 - Slack/Discord targets should use explicit prefixes (e.g. `channel:<id>`, `user:<id>`) to avoid ambiguity.

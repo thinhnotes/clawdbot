@@ -38,6 +38,8 @@ vi.mock("../pairing/pairing-store.js", () => ({
 vi.mock("../config/sessions.js", () => ({
   resolveStorePath: vi.fn(() => "/tmp/clawdbot-sessions.json"),
   updateLastRoute: (...args: unknown[]) => updateLastRouteMock(...args),
+  readSessionUpdatedAt: vi.fn(() => undefined),
+  recordSessionMetaFromInbound: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("./client.js", () => ({
@@ -52,6 +54,10 @@ vi.mock("./client.js", () => ({
       stop: (...args: unknown[]) => stopMock(...args),
     };
   }),
+}));
+
+vi.mock("./probe.js", () => ({
+  probeIMessage: vi.fn(async () => ({ ok: true })),
 }));
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -374,6 +380,13 @@ describe("monitorIMessageProvider", () => {
     closeResolve?.();
     await run;
 
+    expect(replyMock).toHaveBeenCalledOnce();
+    const ctx = replyMock.mock.calls[0]?.[0] as { Body?: string; ChatType?: string };
+    expect(ctx.ChatType).toBe("group");
+    // Sender should appear as prefix in group messages (no redundant [from:] suffix)
+    expect(String(ctx.Body ?? "")).toContain("+15550002222:");
+    expect(String(ctx.Body ?? "")).not.toContain("[from:");
+
     expect(sendMock).toHaveBeenCalledWith(
       "chat_id:42",
       "yo",
@@ -450,5 +463,75 @@ describe("monitorIMessageProvider", () => {
     await run;
 
     expect(replyMock).not.toHaveBeenCalled();
+  });
+
+  it("prefixes group message bodies with sender", async () => {
+    const run = monitorIMessageProvider();
+    await waitForSubscribe();
+
+    notificationHandler?.({
+      method: "message",
+      params: {
+        message: {
+          id: 11,
+          chat_id: 99,
+          chat_name: "Test Group",
+          sender: "+15550001111",
+          is_from_me: false,
+          text: "@clawd hi",
+          is_group: true,
+          created_at: "2026-01-17T00:00:00Z",
+        },
+      },
+    });
+
+    await flush();
+    closeResolve?.();
+    await run;
+
+    expect(replyMock).toHaveBeenCalled();
+    const ctx = replyMock.mock.calls[0]?.[0];
+    const body = ctx?.Body ?? "";
+    expect(body).toContain("Test Group id:99");
+    expect(body).toContain("+15550001111: @clawd hi");
+  });
+
+  it("includes reply context when imessage reply metadata is present", async () => {
+    const run = monitorIMessageProvider();
+    await waitForSubscribe();
+
+    notificationHandler?.({
+      method: "message",
+      params: {
+        message: {
+          id: 12,
+          chat_id: 55,
+          sender: "+15550001111",
+          is_from_me: false,
+          text: "replying now",
+          is_group: false,
+          reply_to_id: 9001,
+          reply_to_text: "original message",
+          reply_to_sender: "+15559998888",
+        },
+      },
+    });
+
+    await flush();
+    closeResolve?.();
+    await run;
+
+    expect(replyMock).toHaveBeenCalled();
+    const ctx = replyMock.mock.calls[0]?.[0] as {
+      Body?: string;
+      ReplyToId?: string;
+      ReplyToBody?: string;
+      ReplyToSender?: string;
+    };
+    expect(ctx.ReplyToId).toBe("9001");
+    expect(ctx.ReplyToBody).toBe("original message");
+    expect(ctx.ReplyToSender).toBe("+15559998888");
+    expect(String(ctx.Body ?? "")).toContain("[Replying to +15559998888 id:9001]");
+    expect(String(ctx.Body ?? "")).toContain("original message");
   });
 });

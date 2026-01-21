@@ -4,10 +4,11 @@ import type { ChannelId } from "../channels/plugins/types.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
 import { note } from "../terminal/note.js";
+import { formatCliCommand } from "../cli/command-format.js";
 
 export async function noteSecurityWarnings(cfg: ClawdbotConfig) {
   const warnings: string[] = [];
-  const auditHint = `- Run: clawdbot security audit --deep`;
+  const auditHint = `- Run: ${formatCliCommand("clawdbot security audit --deep")}`;
 
   const warnDmPolicy = async (params: {
     label: string;
@@ -34,6 +35,8 @@ export async function noteSecurityWarnings(cfg: ClawdbotConfig) {
       .map((v) => v.trim())
       .filter(Boolean);
     const allowCount = Array.from(new Set([...normalizedCfg, ...normalizedStore])).length;
+    const dmScope = cfg.session?.dmScope ?? "main";
+    const isMultiUserDm = hasWildcard || allowCount > 1;
 
     if (dmPolicy === "open") {
       const allowFromPath = `${params.allowFromPath}allowFrom`;
@@ -43,7 +46,6 @@ export async function noteSecurityWarnings(cfg: ClawdbotConfig) {
           `- ${params.label} DMs: config invalid — "open" requires ${allowFromPath} to include "*".`,
         );
       }
-      return;
     }
 
     if (dmPolicy === "disabled") {
@@ -51,11 +53,17 @@ export async function noteSecurityWarnings(cfg: ClawdbotConfig) {
       return;
     }
 
-    if (allowCount === 0) {
+    if (dmPolicy !== "open" && allowCount === 0) {
       warnings.push(
         `- ${params.label} DMs: locked (${policyPath}="${dmPolicy}") with no allowlist; unknown senders will be blocked / get a pairing code.`,
       );
       warnings.push(`  ${params.approveHint}`);
+    }
+
+    if (dmScope === "main" && isMultiUserDm) {
+      warnings.push(
+        `- ${params.label} DMs: multiple senders share the main session; set session.dmScope="per-channel-peer" to isolate sessions.`,
+      );
     }
   };
 

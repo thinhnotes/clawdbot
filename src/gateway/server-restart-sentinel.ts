@@ -11,6 +11,7 @@ import {
 } from "../infra/restart-sentinel.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { defaultRuntime } from "../runtime.js";
+import { deliveryContextFromSession, mergeDeliveryContext } from "../utils/delivery-context.js";
 import { loadSessionEntry } from "./session-utils.js";
 
 export async function scheduleRestartSentinelWake(params: { deps: CliDeps }) {
@@ -27,13 +28,33 @@ export async function scheduleRestartSentinelWake(params: { deps: CliDeps }) {
     return;
   }
 
+  const threadMarker = ":thread:";
+  const threadIndex = sessionKey.lastIndexOf(threadMarker);
+  const baseSessionKey = threadIndex === -1 ? sessionKey : sessionKey.slice(0, threadIndex);
+  const threadIdRaw =
+    threadIndex === -1 ? undefined : sessionKey.slice(threadIndex + threadMarker.length);
+  const sessionThreadId = threadIdRaw?.trim() || undefined;
+
   const { cfg, entry } = loadSessionEntry(sessionKey);
-  const lastChannel = entry?.lastChannel;
-  const lastTo = entry?.lastTo?.trim();
-  const parsedTarget = resolveAnnounceTargetFromKey(sessionKey);
-  const channelRaw = lastChannel ?? parsedTarget?.channel;
+  const parsedTarget = resolveAnnounceTargetFromKey(baseSessionKey);
+
+  // Prefer delivery context from sentinel (captured at restart) over session store
+  // Handles race condition where store wasn't flushed before restart
+  const sentinelContext = payload.deliveryContext;
+  let sessionDeliveryContext = deliveryContextFromSession(entry);
+  if (!sessionDeliveryContext && threadIndex !== -1 && baseSessionKey) {
+    const { entry: baseEntry } = loadSessionEntry(baseSessionKey);
+    sessionDeliveryContext = deliveryContextFromSession(baseEntry);
+  }
+
+  const origin = mergeDeliveryContext(
+    sentinelContext,
+    mergeDeliveryContext(sessionDeliveryContext, parsedTarget ?? undefined),
+  );
+
+  const channelRaw = origin?.channel;
   const channel = channelRaw ? normalizeChannelId(channelRaw) : null;
-  const to = lastTo || parsedTarget?.to;
+  const to = origin?.to;
   if (!channel || !to) {
     enqueueSystemEvent(message, { sessionKey });
     return;
@@ -43,13 +64,18 @@ export async function scheduleRestartSentinelWake(params: { deps: CliDeps }) {
     channel,
     to,
     cfg,
-    accountId: parsedTarget?.accountId ?? entry?.lastAccountId,
+    accountId: origin?.accountId,
     mode: "implicit",
   });
   if (!resolved.ok) {
     enqueueSystemEvent(message, { sessionKey });
     return;
   }
+
+  const threadId =
+    payload.threadId ??
+    sessionThreadId ??
+    (origin?.threadId != null ? String(origin.threadId) : undefined);
 
   try {
     await agentCommand(
@@ -61,6 +87,7 @@ export async function scheduleRestartSentinelWake(params: { deps: CliDeps }) {
         deliver: true,
         bestEffortDeliver: true,
         messageChannel: channel,
+        threadId,
       },
       defaultRuntime,
       params.deps,

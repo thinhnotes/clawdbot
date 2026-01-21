@@ -35,12 +35,25 @@ See [Voice Call](/plugins/voice-call) for a concrete example plugin.
 
 ## Available plugins (official)
 
+- Microsoft Teams is plugin-only as of 2026.1.15; install `@clawdbot/msteams` if you use Teams.
+- Memory (Core) — bundled memory search plugin (enabled by default via `plugins.slots.memory`)
+- Memory (LanceDB) — bundled long-term memory plugin (auto-recall/capture; set `plugins.slots.memory = "memory-lancedb"`)
 - [Voice Call](/plugins/voice-call) — `@clawdbot/voice-call`
+- [Zalo Personal](/plugins/zalouser) — `@clawdbot/zalouser`
 - [Matrix](/channels/matrix) — `@clawdbot/matrix`
+- [Nostr](/channels/nostr) — `@clawdbot/nostr`
 - [Zalo](/channels/zalo) — `@clawdbot/zalo`
+- [Microsoft Teams](/channels/msteams) — `@clawdbot/msteams`
+- Google Antigravity OAuth (provider auth) — bundled as `google-antigravity-auth` (disabled by default)
+- Gemini CLI OAuth (provider auth) — bundled as `google-gemini-cli-auth` (disabled by default)
+- Qwen OAuth (provider auth) — bundled as `qwen-portal-auth` (disabled by default)
+- Copilot Proxy (provider auth) — local VS Code Copilot Proxy bridge; distinct from built-in `github-copilot` device login (bundled, disabled by default)
 
-Clawdbot plugins are **TypeScript modules** loaded at runtime via jiti. They can
-register:
+Clawdbot plugins are **TypeScript modules** loaded at runtime via jiti. **Config
+validation does not execute plugin code**; it uses the plugin manifest and JSON
+Schema instead. See [Plugin manifest](/plugins/manifest).
+
+Plugins can register:
 
 - Gateway RPC methods
 - Gateway HTTP handlers
@@ -50,21 +63,36 @@ register:
 - Optional config validation
 
 Plugins run **in‑process** with the Gateway, so treat them as trusted code.
+Tool authoring guide: [Plugin agent tools](/plugins/agent-tools).
 
 ## Discovery & precedence
 
 Clawdbot scans, in order:
 
-1) Global extensions
-- `~/.clawdbot/extensions/*.ts`
-- `~/.clawdbot/extensions/*/index.ts`
+1) Config paths
+- `plugins.load.paths` (file or directory)
 
 2) Workspace extensions
 - `<workspace>/.clawdbot/extensions/*.ts`
 - `<workspace>/.clawdbot/extensions/*/index.ts`
 
-3) Config paths
-- `plugins.load.paths` (file or directory)
+3) Global extensions
+- `~/.clawdbot/extensions/*.ts`
+- `~/.clawdbot/extensions/*/index.ts`
+
+4) Bundled extensions (shipped with Clawdbot, **disabled by default**)
+- `<clawdbot>/extensions/*`
+
+Bundled plugins must be enabled explicitly via `plugins.entries.<id>.enabled`
+or `clawdbot plugins enable <id>`. Installed plugins are enabled by default,
+but can be disabled the same way.
+
+Each plugin must include a `clawdbot.plugin.json` file in its root. If a path
+points at a file, the plugin root is the file's directory and must contain the
+manifest.
+
+If multiple plugins resolve to the same id, the first match in the order above
+wins and lower-precedence copies are ignored.
 
 ### Package packs
 
@@ -84,6 +112,37 @@ becomes `name/<fileBase>`.
 
 If your plugin imports npm deps, install them in that directory so
 `node_modules` is available (`npm install` / `pnpm install`).
+
+### Channel catalog metadata
+
+Channel plugins can advertise onboarding metadata via `clawdbot.channel` and
+install hints via `clawdbot.install`. This keeps the core catalog data-free.
+
+Example:
+
+```json
+{
+  "name": "@clawdbot/nextcloud-talk",
+  "clawdbot": {
+    "extensions": ["./index.ts"],
+    "channel": {
+      "id": "nextcloud-talk",
+      "label": "Nextcloud Talk",
+      "selectionLabel": "Nextcloud Talk (self-hosted)",
+      "docsPath": "/channels/nextcloud-talk",
+      "docsLabel": "nextcloud-talk",
+      "blurb": "Self-hosted chat via Nextcloud Talk webhook bots.",
+      "order": 65,
+      "aliases": ["nc-talk", "nc"]
+    },
+    "install": {
+      "npmSpec": "@clawdbot/nextcloud-talk",
+      "localPath": "extensions/nextcloud-talk",
+      "defaultChoice": "npm"
+    }
+  }
+}
+```
 
 ## Plugin IDs
 
@@ -120,6 +179,32 @@ Fields:
 
 Config changes **require a gateway restart**.
 
+Validation rules (strict):
+- Unknown plugin ids in `entries`, `allow`, `deny`, or `slots` are **errors**.
+- Unknown `channels.<id>` keys are **errors** unless a plugin manifest declares
+  the channel id.
+- Plugin config is validated using the JSON Schema embedded in
+  `clawdbot.plugin.json` (`configSchema`).
+- If a plugin is disabled, its config is preserved and a **warning** is emitted.
+
+## Plugin slots (exclusive categories)
+
+Some plugin categories are **exclusive** (only one active at a time). Use
+`plugins.slots` to select which plugin owns the slot:
+
+```json5
+{
+  plugins: {
+    slots: {
+      memory: "memory-core" // or "none" to disable memory plugins
+    }
+  }
+}
+```
+
+If multiple plugins declare `kind: "memory"`, only the selected one loads. Others
+are disabled with diagnostics.
+
 ## Control UI (schema + labels)
 
 The Control UI uses `config.schema` (JSON Schema + `uiHints`) to render better forms.
@@ -131,22 +216,26 @@ Clawdbot augments `uiHints` at runtime based on discovered plugins:
   `plugins.entries.<id>.config.<field>`
 
 If you want your plugin config fields to show good labels/placeholders (and mark secrets as sensitive),
-provide `configSchema.uiHints`.
+provide `uiHints` alongside your JSON Schema in the plugin manifest.
 
 Example:
 
-```ts
-export default {
-  id: "my-plugin",
-  configSchema: {
-    parse: (v) => v,
-    uiHints: {
-      "apiKey": { label: "API Key", sensitive: true },
-      "region": { label: "Region", placeholder: "us-east-1" },
-    },
+```json
+{
+  "id": "my-plugin",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": { "type": "string" },
+      "region": { "type": "string" }
+    }
   },
-  register(api) {},
-};
+  "uiHints": {
+    "apiKey": { "label": "API Key", "sensitive": true },
+    "region": { "label": "Region", "placeholder": "us-east-1" }
+  }
+}
 ```
 
 ## CLI
@@ -154,14 +243,20 @@ export default {
 ```bash
 clawdbot plugins list
 clawdbot plugins info <id>
-clawdbot plugins install <path>              # add a local file/dir to plugins.load.paths
+clawdbot plugins install <path>                 # copy a local file/dir into ~/.clawdbot/extensions/<id>
 clawdbot plugins install ./extensions/voice-call # relative path ok
-clawdbot plugins install ./plugin.tgz        # install from a local tarball
+clawdbot plugins install ./plugin.tgz           # install from a local tarball
+clawdbot plugins install ./plugin.zip           # install from a local zip
+clawdbot plugins install -l ./extensions/voice-call # link (no copy) for dev
 clawdbot plugins install @clawdbot/voice-call # install from npm
+clawdbot plugins update <id>
+clawdbot plugins update --all
 clawdbot plugins enable <id>
 clawdbot plugins disable <id>
 clawdbot plugins doctor
 ```
+
+`plugins update` only works for npm installs tracked under `plugins.installs`.
 
 Plugins may also register their own top‑level commands (example: `clawdbot voicecall`).
 
@@ -171,6 +266,27 @@ Plugins export either:
 
 - A function: `(api) => { ... }`
 - An object: `{ id, name, configSchema, register(api) { ... } }`
+
+## Plugin hooks
+
+Plugins can ship hooks and register them at runtime. This lets a plugin bundle
+event-driven automation without a separate hook pack install.
+
+### Example
+
+```
+import { registerPluginHooksFromDir } from "clawdbot/plugin-sdk";
+
+export default function register(api) {
+  registerPluginHooksFromDir(api, "./hooks");
+}
+```
+
+Notes:
+- Hook directories follow the normal hook structure (`HOOK.md` + `handler.ts`).
+- Hook eligibility rules still apply (OS/bins/env/config requirements).
+- Plugin-managed hooks show up in `clawdbot hooks list` with `plugin:<id>`.
+- You cannot enable/disable plugin-managed hooks via `clawdbot hooks`; enable/disable the plugin instead.
 
 ## Provider plugins (model auth)
 
@@ -260,6 +376,8 @@ Notes:
 - Put config under `channels.<id>` (not `plugins.entries`).
 - `meta.label` is used for labels in CLI/UI lists.
 - `meta.aliases` adds alternate ids for normalization and CLI inputs.
+- `meta.preferOver` lists channel ids to skip auto-enable when both are configured.
+- `meta.detailLabel` and `meta.systemImage` let UIs show richer channel labels/icons.
 
 ### Write a new messaging channel (step‑by‑step)
 
@@ -273,6 +391,8 @@ Model provider docs live under `/providers/*`.
 2) Define the channel metadata
 - `meta.label`, `meta.selectionLabel`, `meta.docsPath`, `meta.blurb` control CLI/UI lists.
 - `meta.docsPath` should point at a docs page like `/channels/<id>`.
+- `meta.preferOver` lets a plugin replace another channel (auto-enable prefers it).
+- `meta.detailLabel` and `meta.systemImage` are used by UIs for detail text/icons.
 
 3) Implement the required adapters
 - `config.listAccountIds` + `config.resolveAccount`
@@ -337,24 +457,9 @@ export default function (api) {
 Load the plugin (extensions dir or `plugins.load.paths`), restart the gateway,
 then configure `channels.<id>` in your config.
 
-### Register a tool
+### Agent tools
 
-```ts
-import { Type } from "@sinclair/typebox";
-
-export default function (api) {
-  api.registerTool({
-    name: "my_tool",
-    description: "Do a thing",
-    parameters: Type.Object({
-      input: Type.String(),
-    }),
-    async execute(_id, params) {
-      return { content: [{ type: "text", text: params.input }] };
-    },
-  });
-}
-```
+See the dedicated guide: [Plugin agent tools](/plugins/agent-tools).
 
 ### Register a gateway RPC method
 

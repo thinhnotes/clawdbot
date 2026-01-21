@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import lockfile from "proper-lockfile";
-import { requirePairingAdapter } from "../channels/plugins/pairing.js";
-import type { ChannelId } from "../channels/plugins/types.js";
+import { getPairingAdapter } from "../channels/plugins/pairing.js";
+import type { ChannelId, ChannelPairingAdapter } from "../channels/plugins/types.js";
 import { resolveOAuthDir, resolveStateDir } from "../config/paths.js";
 
 const PAIRING_CODE_LENGTH = 8;
@@ -48,15 +48,24 @@ function resolveCredentialsDir(env: NodeJS.ProcessEnv = process.env): string {
   return resolveOAuthDir(env, stateDir);
 }
 
+/** Sanitize channel ID for use in filenames (prevent path traversal). */
+function safeChannelKey(channel: PairingChannel): string {
+  const raw = String(channel).trim().toLowerCase();
+  if (!raw) throw new Error("invalid pairing channel");
+  const safe = raw.replace(/[\\/:*?"<>|]/g, "_").replace(/\.\./g, "_");
+  if (!safe || safe === "_") throw new Error("invalid pairing channel");
+  return safe;
+}
+
 function resolvePairingPath(channel: PairingChannel, env: NodeJS.ProcessEnv = process.env): string {
-  return path.join(resolveCredentialsDir(env), `${channel}-pairing.json`);
+  return path.join(resolveCredentialsDir(env), `${safeChannelKey(channel)}-pairing.json`);
 }
 
 function resolveAllowFromPath(
   channel: PairingChannel,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return path.join(resolveCredentialsDir(env), `${channel}-allowFrom.json`);
+  return path.join(resolveCredentialsDir(env), `${safeChannelKey(channel)}-allowFrom.json`);
 }
 
 function safeParseJson<T>(raw: string): T | null {
@@ -184,11 +193,11 @@ function normalizeId(value: string | number): string {
 }
 
 function normalizeAllowEntry(channel: PairingChannel, entry: string): string {
-  const adapter = requirePairingAdapter(channel);
   const trimmed = entry.trim();
   if (!trimmed) return "";
   if (trimmed === "*") return "";
-  const normalized = adapter.normalizeAllowEntry ? adapter.normalizeAllowEntry(trimmed) : trimmed;
+  const adapter = getPairingAdapter(channel);
+  const normalized = adapter?.normalizeAllowEntry ? adapter.normalizeAllowEntry(trimmed) : trimmed;
   return String(normalized).trim();
 }
 
@@ -196,7 +205,6 @@ export async function readChannelAllowFromStore(
   channel: PairingChannel,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string[]> {
-  requirePairingAdapter(channel);
   const filePath = resolveAllowFromPath(channel, env);
   const { value } = await readJsonFile<AllowFromStore>(filePath, {
     version: 1,
@@ -211,7 +219,6 @@ export async function addChannelAllowFromStoreEntry(params: {
   entry: string | number;
   env?: NodeJS.ProcessEnv;
 }): Promise<{ changed: boolean; allowFrom: string[] }> {
-  requirePairingAdapter(params.channel);
   const env = params.env ?? process.env;
   const filePath = resolveAllowFromPath(params.channel, env);
   return await withFileLock(
@@ -238,11 +245,41 @@ export async function addChannelAllowFromStoreEntry(params: {
   );
 }
 
+export async function removeChannelAllowFromStoreEntry(params: {
+  channel: PairingChannel;
+  entry: string | number;
+  env?: NodeJS.ProcessEnv;
+}): Promise<{ changed: boolean; allowFrom: string[] }> {
+  const env = params.env ?? process.env;
+  const filePath = resolveAllowFromPath(params.channel, env);
+  return await withFileLock(
+    filePath,
+    { version: 1, allowFrom: [] } satisfies AllowFromStore,
+    async () => {
+      const { value } = await readJsonFile<AllowFromStore>(filePath, {
+        version: 1,
+        allowFrom: [],
+      });
+      const current = (Array.isArray(value.allowFrom) ? value.allowFrom : [])
+        .map((v) => normalizeAllowEntry(params.channel, String(v)))
+        .filter(Boolean);
+      const normalized = normalizeAllowEntry(params.channel, normalizeId(params.entry));
+      if (!normalized) return { changed: false, allowFrom: current };
+      const next = current.filter((entry) => entry !== normalized);
+      if (next.length === current.length) return { changed: false, allowFrom: current };
+      await writeJsonFile(filePath, {
+        version: 1,
+        allowFrom: next,
+      } satisfies AllowFromStore);
+      return { changed: true, allowFrom: next };
+    },
+  );
+}
+
 export async function listChannelPairingRequests(
   channel: PairingChannel,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<PairingRequest[]> {
-  requirePairingAdapter(channel);
   const filePath = resolvePairingPath(channel, env);
   return await withFileLock(
     filePath,
@@ -287,8 +324,9 @@ export async function upsertChannelPairingRequest(params: {
   id: string | number;
   meta?: Record<string, string | undefined | null>;
   env?: NodeJS.ProcessEnv;
+  /** Extension channels can pass their adapter directly to bypass registry lookup. */
+  pairingAdapter?: ChannelPairingAdapter;
 }): Promise<{ code: string; created: boolean }> {
-  requirePairingAdapter(params.channel);
   const env = params.env ?? process.env;
   const filePath = resolvePairingPath(params.channel, env);
   return await withFileLock(
@@ -383,7 +421,6 @@ export async function approveChannelPairingCode(params: {
   code: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<{ id: string; entry?: PairingRequest } | null> {
-  requirePairingAdapter(params.channel);
   const env = params.env ?? process.env;
   const code = params.code.trim().toUpperCase();
   if (!code) return null;

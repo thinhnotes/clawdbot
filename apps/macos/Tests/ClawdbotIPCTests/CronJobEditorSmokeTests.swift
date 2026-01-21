@@ -11,16 +11,19 @@ struct CronJobEditorSmokeTests {
     }
 
     @Test func cronJobEditorBuildsBodyForNewJob() {
+        let channelsStore = ChannelsStore(isPreview: true)
         let view = CronJobEditor(
             job: nil,
             isSaving: .constant(false),
             error: .constant(nil),
+            channelsStore: channelsStore,
             onCancel: {},
             onSave: { _ in })
         _ = view.body
     }
 
     @Test func cronJobEditorBuildsBodyForExistingJob() {
+        let channelsStore = ChannelsStore(isPreview: true)
         let job = CronJob(
             id: "job-1",
             agentId: "ops",
@@ -38,7 +41,7 @@ struct CronJobEditorSmokeTests {
                 thinking: "low",
                 timeoutSeconds: 120,
                 deliver: true,
-                provider: "whatsapp",
+                channel: "whatsapp",
                 to: "+15551234567",
                 bestEffortDeliver: true),
             isolation: CronIsolation(postToMainPrefix: "Cron"),
@@ -54,38 +57,37 @@ struct CronJobEditorSmokeTests {
             job: job,
             isSaving: .constant(false),
             error: .constant(nil),
+            channelsStore: channelsStore,
             onCancel: {},
             onSave: { _ in })
         _ = view.body
     }
 
     @Test func cronJobEditorExercisesBuilders() {
+        let channelsStore = ChannelsStore(isPreview: true)
         var view = CronJobEditor(
             job: nil,
             isSaving: .constant(false),
             error: .constant(nil),
+            channelsStore: channelsStore,
             onCancel: {},
             onSave: { _ in })
         view.exerciseForTesting()
     }
 
     @Test func cronJobEditorIncludesDeleteAfterRunForAtSchedule() throws {
-        var view = CronJobEditor(
+        let channelsStore = ChannelsStore(isPreview: true)
+        let view = CronJobEditor(
             job: nil,
             isSaving: .constant(false),
             error: .constant(nil),
+            channelsStore: channelsStore,
             onCancel: {},
             onSave: { _ in })
-        view.name = "One-shot"
-        view.sessionTarget = .main
-        view.payloadKind = .systemEvent
-        view.systemEventText = "hello"
-        view.scheduleKind = .at
-        view.atDate = Date(timeIntervalSince1970: 1_700_000_000)
-        view.deleteAfterRun = true
 
-        let payload = try view.buildPayload()
-        let raw = payload["deleteAfterRun"]?.value as? Bool
+        var root: [String: Any] = [:]
+        view.applyDeleteAfterRun(to: &root, scheduleKind: CronJobEditor.ScheduleKind.at, deleteAfterRun: true)
+        let raw = root["deleteAfterRun"] as? Bool
         #expect(raw == true)
     }
 }

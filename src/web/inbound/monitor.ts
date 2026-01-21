@@ -3,7 +3,8 @@ import { DisconnectReason, isJidGroup } from "@whiskeysockets/baileys";
 import { formatLocationText } from "../../channels/location.js";
 import { logVerbose, shouldLogVerbose } from "../../globals.js";
 import { recordChannelActivity } from "../../infra/channel-activity.js";
-import { createSubsystemLogger, getChildLogger } from "../../logging.js";
+import { getChildLogger } from "../../logging/logger.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { saveMediaBuffer } from "../../media/store.js";
 import { createInboundDebouncer } from "../../auto-reply/inbound-debounce.js";
 import { jidToE164, resolveJidToE164 } from "../../utils.js";
@@ -40,6 +41,7 @@ export async function monitorWebInbox(options: {
     authDir: options.authDir,
   });
   await waitForWaConnection(sock);
+  const connectedAtMs = Date.now();
 
   let onCloseResolve: ((reason: WebListenerCloseReason) => void) | null = null;
   const onClose = new Promise<WebListenerCloseReason>((resolve) => {
@@ -171,6 +173,9 @@ export async function monitorWebInbox(options: {
         groupSubject = meta.subject;
         groupParticipants = meta.participants;
       }
+      const messageTimestampMs = msg.messageTimestamp
+        ? Number(msg.messageTimestamp) * 1000
+        : undefined;
 
       const access = await checkInboundAccessControl({
         accountId: options.accountId,
@@ -180,6 +185,8 @@ export async function monitorWebInbox(options: {
         group,
         pushName: msg.pushName ?? undefined,
         isFromMe: Boolean(msg.key?.fromMe),
+        messageTimestampMs,
+        connectedAtMs,
         sock: { sendMessage: (jid, content) => sock.sendMessage(jid, content) },
         remoteJid,
       });
@@ -253,7 +260,7 @@ export async function monitorWebInbox(options: {
       const sendMedia = async (payload: AnyMessageContent) => {
         await sock.sendMessage(chatJid, payload);
       };
-      const timestamp = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : undefined;
+      const timestamp = messageTimestampMs;
       const mentionedJids = extractMentionedJids(msg.message as proto.IMessage | undefined);
       const senderName = msg.pushName ?? undefined;
 
@@ -278,6 +285,8 @@ export async function monitorWebInbox(options: {
         replyToId: replyContext?.id,
         replyToBody: replyContext?.body,
         replyToSender: replyContext?.sender,
+        replyToSenderJid: replyContext?.senderJid,
+        replyToSenderE164: replyContext?.senderE164,
         groupSubject,
         groupParticipants,
         mentionedJids: mentionedJids ?? undefined,

@@ -5,13 +5,6 @@ read_when:
 ---
 # Security 🔒
 
-Running an AI agent with shell access on your machine is... *spicy*. Here’s how to not get pwned.
-
-Clawdbot is both a product and an experiment: you’re wiring frontier-model behavior into real messaging surfaces and real tools. **There is no “perfectly secure” setup.** The goal is to be deliberate about:
-- who can talk to your bot
-- where the bot is allowed to act
-- what the bot can touch
-
 ## Quick check: `clawdbot security audit`
 
 Run this regularly (especially after changing config or exposing network surfaces):
@@ -28,6 +21,13 @@ It flags common footguns (Gateway auth exposure, browser control exposure, eleva
 - Tighten `groupPolicy="open"` to `groupPolicy="allowlist"` (and per-account variants) for common channels.
 - Turn `logging.redactSensitive="off"` back to `"tools"`.
 - Tighten local perms (`~/.clawdbot` → `700`, config file → `600`, plus common state files like `credentials/*.json`, `agents/*/agent/auth-profiles.json`, and `agents/*/sessions/sessions.json`).
+
+Running an AI agent with shell access on your machine is... *spicy*. Here’s how to not get pwned.
+
+Clawdbot is both a product and an experiment: you’re wiring frontier-model behavior into real messaging surfaces and real tools. **There is no “perfectly secure” setup.** The goal is to be deliberate about:
+- who can talk to your bot
+- where the bot is allowed to act
+- what the bot can touch
 
 ### What the audit checks (high level)
 
@@ -51,6 +51,30 @@ When the audit prints findings, treat this as a priority order:
 4. **Permissions**: make sure state/config/credentials/auth are not group/world-readable.
 5. **Plugins/extensions**: only load what you explicitly trust.
 6. **Model choice**: prefer modern, instruction-hardened models for any bot with tools.
+
+## Local session logs live on disk
+
+Clawdbot stores session transcripts on disk under `~/.clawdbot/agents/<agentId>/sessions/*.jsonl`.
+This is required for session continuity and (optionally) session memory indexing, but it also means
+**any process/user with filesystem access can read those logs**. Treat disk access as the trust
+boundary and lock down permissions on `~/.clawdbot` (see the audit section below). If you need
+stronger isolation between agents, run them under separate OS users or separate hosts.
+
+## Node execution (system.run)
+
+If a macOS node is paired, the Gateway can invoke `system.run` on that node. This is **remote code execution** on the Mac:
+
+- Requires node pairing (approval + token).
+- Controlled on the Mac via **Settings → Exec approvals** (security + ask + allowlist).
+- If you don’t want remote execution, set security to **deny** and remove node pairing for that Mac.
+
+## Dynamic skills (watcher / remote nodes)
+
+Clawdbot can refresh the skills list mid-session:
+- **Skills watcher**: changes to `SKILL.md` can update the skills snapshot on the next agent turn.
+- **Remote nodes**: connecting a macOS node can make macOS-only skills eligible (based on bin probing).
+
+Treat skill folders as **trusted code** and restrict who can modify them.
 
 ## The Threat Model
 
@@ -107,6 +131,18 @@ clawdbot pairing approve <channel> <code>
 
 Details + files on disk: [Pairing](/start/pairing)
 
+## DM session isolation (multi-user mode)
+
+By default, Clawdbot routes **all DMs into the main session** so your assistant has continuity across devices and channels. If **multiple people** can DM the bot (open DMs or a multi-person allowlist), consider isolating DM sessions:
+
+```json5
+{
+  session: { dmScope: "per-channel-peer" }
+}
+```
+
+This prevents cross-user context leakage while keeping group chats isolated. If the same person contacts you on multiple channels, use `session.identityLinks` to collapse those DM sessions into one canonical identity. See [Session Management](/concepts/session) and [Configuration](/gateway/configuration).
+
 ## Allowlists (DM + groups) — terminology
 
 Clawdbot has two separate “who can trigger me?” layers:
@@ -132,6 +168,16 @@ Even with strong system prompts, **prompt injection is not solved**. What helps 
 - Treat links and pasted instructions as hostile by default.
 - Run sensitive tool execution in a sandbox; keep secrets out of the agent’s reachable filesystem.
 - **Model choice matters:** older/legacy models can be less robust against prompt injection and tool misuse. Prefer modern, instruction-hardened models for any bot with tools. We recommend Anthropic Opus 4.5 because it’s quite good at recognizing prompt injections (see [“A step forward on safety”](https://www.anthropic.com/news/claude-opus-4-5)).
+
+### Model strength (security note)
+
+Prompt injection resistance is **not** uniform across model tiers. Smaller/cheaper models are generally more susceptible to tool misuse and instruction hijacking, especially under adversarial prompts.
+
+Recommendations:
+- **Use the latest generation, best-tier model** for any bot that can run tools or touch files/networks.
+- **Avoid weaker tiers** (for example, Sonnet or Haiku) for tool-enabled agents or untrusted inboxes.
+- If you must use a smaller model, **reduce blast radius** (read-only tools, strong sandboxing, minimal filesystem access, strict allowlists).
+- When running small models, **enable sandboxing for all sessions** and **disable web_search/web_fetch/browser** unless inputs are tightly controlled.
 
 ## Reasoning & verbose output in groups
 
@@ -222,6 +268,13 @@ Doctor can generate one for you: `clawdbot doctor --generate-gateway-token`.
 
 Note: `gateway.remote.token` is **only** for remote CLI calls; it does not
 protect local WS access.
+Optional: pin remote TLS with `gateway.remote.tlsFingerprint` when using `wss://`.
+
+Local device pairing:
+- Device pairing is auto‑approved for **local** connects (loopback or the
+  gateway host’s own tailnet address) to keep same‑host clients smooth.
+- Other tailnet peers are **not** treated as local; they still need pairing
+  approval.
 
 Auth modes:
 - `gateway.auth.mode: "token"`: shared bearer token (recommended for most setups).

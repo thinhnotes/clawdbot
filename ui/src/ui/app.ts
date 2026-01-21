@@ -20,23 +20,19 @@ import type {
   SessionsListResult,
   SkillStatusReport,
   StatusSummary,
+  NostrProfile,
 } from "./types";
-import {
-  defaultDiscordActions,
-  defaultSlackActions,
-  type ChatQueueItem,
-  type CronFormState,
-  type DiscordForm,
-  type IMessageForm,
-  type SlackForm,
-  type SignalForm,
-  type TelegramForm,
-} from "./ui-types";
+import { type ChatQueueItem, type CronFormState } from "./ui-types";
 import type { EventLogEntry } from "./app-events";
 import { DEFAULT_CRON_FORM, DEFAULT_LOG_LEVEL_FILTERS } from "./app-defaults";
+import type {
+  ExecApprovalsFile,
+  ExecApprovalsSnapshot,
+} from "./controllers/exec-approvals";
+import type { DevicePairingList } from "./controllers/devices";
+import type { ExecApprovalRequest } from "./controllers/exec-approval";
 import {
   resetToolStream as resetToolStreamInternal,
-  toggleToolOutput as toggleToolOutputInternal,
   type ToolStreamEntry,
 } from "./app-tool-stream";
 import {
@@ -66,15 +62,19 @@ import {
   removeQueuedMessage as removeQueuedMessageInternal,
 } from "./app-chat";
 import {
-  handleDiscordSave as handleDiscordSaveInternal,
-  handleIMessageSave as handleIMessageSaveInternal,
-  handleSignalSave as handleSignalSaveInternal,
-  handleSlackSave as handleSlackSaveInternal,
-  handleTelegramSave as handleTelegramSaveInternal,
+  handleChannelConfigReload as handleChannelConfigReloadInternal,
+  handleChannelConfigSave as handleChannelConfigSaveInternal,
+  handleNostrProfileCancel as handleNostrProfileCancelInternal,
+  handleNostrProfileEdit as handleNostrProfileEditInternal,
+  handleNostrProfileFieldChange as handleNostrProfileFieldChangeInternal,
+  handleNostrProfileImport as handleNostrProfileImportInternal,
+  handleNostrProfileSave as handleNostrProfileSaveInternal,
+  handleNostrProfileToggleAdvanced as handleNostrProfileToggleAdvancedInternal,
   handleWhatsAppLogout as handleWhatsAppLogoutInternal,
   handleWhatsAppStart as handleWhatsAppStartInternal,
   handleWhatsAppWait as handleWhatsAppWaitInternal,
-} from "./app-connections";
+} from "./app-channels";
+import type { NostrProfileFormState } from "./views/channels.nostr-profile-form";
 
 declare global {
   interface Window {
@@ -108,7 +108,6 @@ export class ClawdbotApp extends LitElement {
   @state() chatRunId: string | null = null;
   @state() chatThinkingLevel: string | null = null;
   @state() chatQueue: ChatQueueItem[] = [];
-  @state() toolOutputExpanded = new Set<string>();
   // Sidebar state for tool output viewing
   @state() sidebarOpen = false;
   @state() sidebarContent: string | null = null;
@@ -117,6 +116,20 @@ export class ClawdbotApp extends LitElement {
 
   @state() nodesLoading = false;
   @state() nodes: Array<Record<string, unknown>> = [];
+  @state() devicesLoading = false;
+  @state() devicesError: string | null = null;
+  @state() devicesList: DevicePairingList | null = null;
+  @state() execApprovalsLoading = false;
+  @state() execApprovalsSaving = false;
+  @state() execApprovalsDirty = false;
+  @state() execApprovalsSnapshot: ExecApprovalsSnapshot | null = null;
+  @state() execApprovalsForm: ExecApprovalsFile | null = null;
+  @state() execApprovalsSelectedAgent: string | null = null;
+  @state() execApprovalsTarget: "gateway" | "node" = "gateway";
+  @state() execApprovalsTargetNodeId: string | null = null;
+  @state() execApprovalQueue: ExecApprovalRequest[] = [];
+  @state() execApprovalBusy = false;
+  @state() execApprovalError: string | null = null;
 
   @state() configLoading = false;
   @state() configRaw = "{\n}\n";
@@ -132,8 +145,12 @@ export class ClawdbotApp extends LitElement {
   @state() configSchemaLoading = false;
   @state() configUiHints: ConfigUiHints = {};
   @state() configForm: Record<string, unknown> | null = null;
+  @state() configFormOriginal: Record<string, unknown> | null = null;
   @state() configFormDirty = false;
   @state() configFormMode: "form" | "raw" = "form";
+  @state() configSearchQuery = "";
+  @state() configActiveSection: string | null = null;
+  @state() configActiveSubsection: string | null = null;
 
   @state() channelsLoading = false;
   @state() channelsSnapshot: ChannelsStatusSnapshot | null = null;
@@ -143,91 +160,8 @@ export class ClawdbotApp extends LitElement {
   @state() whatsappLoginQrDataUrl: string | null = null;
   @state() whatsappLoginConnected: boolean | null = null;
   @state() whatsappBusy = false;
-  @state() telegramForm: TelegramForm = {
-    token: "",
-    requireMention: true,
-    groupsWildcardEnabled: false,
-    allowFrom: "",
-    proxy: "",
-    webhookUrl: "",
-    webhookSecret: "",
-    webhookPath: "",
-  };
-  @state() telegramSaving = false;
-  @state() telegramTokenLocked = false;
-  @state() telegramConfigStatus: string | null = null;
-  @state() discordForm: DiscordForm = {
-    enabled: true,
-    token: "",
-    dmEnabled: true,
-    allowFrom: "",
-    groupEnabled: false,
-    groupChannels: "",
-    mediaMaxMb: "",
-    historyLimit: "",
-    textChunkLimit: "",
-    guilds: [],
-    actions: { ...defaultDiscordActions },
-    slashEnabled: false,
-    slashName: "",
-    slashSessionPrefix: "",
-    slashEphemeral: true,
-  };
-  @state() discordSaving = false;
-  @state() discordTokenLocked = false;
-  @state() discordConfigStatus: string | null = null;
-  @state() slackForm: SlackForm = {
-    enabled: true,
-    botToken: "",
-    appToken: "",
-    dmEnabled: true,
-    allowFrom: "",
-    groupEnabled: false,
-    groupChannels: "",
-    mediaMaxMb: "",
-    textChunkLimit: "",
-    reactionNotifications: "own",
-    reactionAllowlist: "",
-    slashEnabled: false,
-    slashName: "",
-    slashSessionPrefix: "",
-    slashEphemeral: true,
-    actions: { ...defaultSlackActions },
-    channels: [],
-  };
-  @state() slackSaving = false;
-  @state() slackTokenLocked = false;
-  @state() slackAppTokenLocked = false;
-  @state() slackConfigStatus: string | null = null;
-  @state() signalForm: SignalForm = {
-    enabled: true,
-    account: "",
-    httpUrl: "",
-    httpHost: "",
-    httpPort: "",
-    cliPath: "",
-    autoStart: true,
-    receiveMode: "",
-    ignoreAttachments: false,
-    ignoreStories: false,
-    sendReadReceipts: false,
-    allowFrom: "",
-    mediaMaxMb: "",
-  };
-  @state() signalSaving = false;
-  @state() signalConfigStatus: string | null = null;
-  @state() imessageForm: IMessageForm = {
-    enabled: true,
-    cliPath: "",
-    dbPath: "",
-    service: "auto",
-    region: "",
-    allowFrom: "",
-    includeAttachments: false,
-    mediaMaxMb: "",
-  };
-  @state() imessageSaving = false;
-  @state() imessageConfigStatus: string | null = null;
+  @state() nostrProfileFormState: NostrProfileFormState | null = null;
+  @state() nostrProfileAccountId: string | null = null;
 
   @state() presenceLoading = false;
   @state() presenceEntries: PresenceEntry[] = [];
@@ -365,13 +299,6 @@ export class ClawdbotApp extends LitElement {
     );
   }
 
-  toggleToolOutput(id: string, expanded: boolean) {
-    toggleToolOutputInternal(
-      this as unknown as Parameters<typeof toggleToolOutputInternal>[0],
-      id,
-      expanded,
-    );
-  }
   applySettings(next: UiSettings) {
     applySettingsInternal(
       this as unknown as Parameters<typeof applySettingsInternal>[0],
@@ -439,24 +366,54 @@ export class ClawdbotApp extends LitElement {
     await handleWhatsAppLogoutInternal(this);
   }
 
-  async handleTelegramSave() {
-    await handleTelegramSaveInternal(this);
+  async handleChannelConfigSave() {
+    await handleChannelConfigSaveInternal(this);
   }
 
-  async handleDiscordSave() {
-    await handleDiscordSaveInternal(this);
+  async handleChannelConfigReload() {
+    await handleChannelConfigReloadInternal(this);
   }
 
-  async handleSlackSave() {
-    await handleSlackSaveInternal(this);
+  handleNostrProfileEdit(accountId: string, profile: NostrProfile | null) {
+    handleNostrProfileEditInternal(this, accountId, profile);
   }
 
-  async handleSignalSave() {
-    await handleSignalSaveInternal(this);
+  handleNostrProfileCancel() {
+    handleNostrProfileCancelInternal(this);
   }
 
-  async handleIMessageSave() {
-    await handleIMessageSaveInternal(this);
+  handleNostrProfileFieldChange(field: keyof NostrProfile, value: string) {
+    handleNostrProfileFieldChangeInternal(this, field, value);
+  }
+
+  async handleNostrProfileSave() {
+    await handleNostrProfileSaveInternal(this);
+  }
+
+  async handleNostrProfileImport() {
+    await handleNostrProfileImportInternal(this);
+  }
+
+  handleNostrProfileToggleAdvanced() {
+    handleNostrProfileToggleAdvancedInternal(this);
+  }
+
+  async handleExecApprovalDecision(decision: "allow-once" | "allow-always" | "deny") {
+    const active = this.execApprovalQueue[0];
+    if (!active || !this.client || this.execApprovalBusy) return;
+    this.execApprovalBusy = true;
+    this.execApprovalError = null;
+    try {
+      await this.client.request("exec.approval.resolve", {
+        id: active.id,
+        decision,
+      });
+      this.execApprovalQueue = this.execApprovalQueue.filter((entry) => entry.id !== active.id);
+    } catch (err) {
+      this.execApprovalError = `Exec approval failed: ${String(err)}`;
+    } finally {
+      this.execApprovalBusy = false;
+    }
   }
 
   // Sidebar handlers for tool output viewing

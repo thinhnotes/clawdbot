@@ -18,6 +18,17 @@ export function isContextOverflowError(errorMessage?: string): boolean {
   );
 }
 
+const CONTEXT_WINDOW_TOO_SMALL_RE = /context window.*(too small|minimum is)/i;
+const CONTEXT_OVERFLOW_HINT_RE =
+  /context.*overflow|context window.*(too (?:large|long)|exceed|over|limit|max(?:imum)?|requested|sent|tokens)|(?:prompt|request|input).*(too (?:large|long)|exceed|over|limit|max(?:imum)?)/i;
+
+export function isLikelyContextOverflowError(errorMessage?: string): boolean {
+  if (!errorMessage) return false;
+  if (CONTEXT_WINDOW_TOO_SMALL_RE.test(errorMessage)) return false;
+  if (isContextOverflowError(errorMessage)) return true;
+  return CONTEXT_OVERFLOW_HINT_RE.test(errorMessage);
+}
+
 export function isCompactionFailureError(errorMessage?: string): boolean {
   if (!errorMessage) return false;
   if (!isContextOverflowError(errorMessage)) return false;
@@ -32,6 +43,41 @@ export function isCompactionFailureError(errorMessage?: string): boolean {
 
 const ERROR_PAYLOAD_PREFIX_RE =
   /^(?:error|api\s*error|apierror|openai\s*error|anthropic\s*error|gateway\s*error)[:\s-]+/i;
+const FINAL_TAG_RE = /<\s*\/?\s*final\s*>/gi;
+const ERROR_PREFIX_RE =
+  /^(?:error|api\s*error|openai\s*error|anthropic\s*error|gateway\s*error|request failed|failed|exception)[:\s-]+/i;
+const HTTP_STATUS_PREFIX_RE = /^(?:http\s*)?(\d{3})\s+(.+)$/i;
+const HTTP_ERROR_HINTS = [
+  "error",
+  "bad request",
+  "not found",
+  "unauthorized",
+  "forbidden",
+  "internal server",
+  "service unavailable",
+  "gateway",
+  "rate limit",
+  "overloaded",
+  "timeout",
+  "timed out",
+  "invalid",
+  "too many requests",
+  "permission",
+];
+
+function stripFinalTagsFromText(text: string): string {
+  if (!text) return text;
+  return text.replace(FINAL_TAG_RE, "");
+}
+
+function isLikelyHttpErrorText(raw: string): boolean {
+  const match = raw.match(HTTP_STATUS_PREFIX_RE);
+  if (!match) return false;
+  const code = Number(match[1]);
+  if (!Number.isFinite(code) || code < 400) return false;
+  const message = match[2].toLowerCase();
+  return HTTP_ERROR_HINTS.some((hint) => message.includes(hint));
+}
 
 type ErrorPayload = Record<string, unknown>;
 
@@ -170,8 +216,9 @@ export function formatAssistantErrorText(
   msg: AssistantMessage,
   opts?: { cfg?: ClawdbotConfig; sessionKey?: string },
 ): string | undefined {
-  if (msg.stopReason !== "error") return undefined;
+  // Also format errors if errorMessage is present, even if stopReason isn't "error"
   const raw = (msg.errorMessage ?? "").trim();
+  if (msg.stopReason !== "error" && !raw) return undefined;
   if (!raw) return "LLM request failed with an unknown error.";
 
   const unknownTool =
@@ -193,7 +240,12 @@ export function formatAssistantErrorText(
     );
   }
 
-  if (/incorrect role information|roles must alternate/i.test(raw)) {
+  // Catch role ordering errors - including JSON-wrapped and "400" prefix variants
+  if (
+    /incorrect role information|roles must alternate|400.*role|"message".*role.*information/i.test(
+      raw,
+    )
+  ) {
     return (
       "Message ordering conflict - please try again. " +
       "If this persists, use /new to start a fresh session."
@@ -213,7 +265,48 @@ export function formatAssistantErrorText(
     return "The AI service returned an error. Please try again.";
   }
 
+  // Never return raw unhandled errors - log for debugging but return safe message
+  if (raw.length > 600) {
+    console.warn("[formatAssistantErrorText] Long error truncated:", raw.slice(0, 200));
+  }
   return raw.length > 600 ? `${raw.slice(0, 600)}…` : raw;
+}
+
+export function sanitizeUserFacingText(text: string): string {
+  if (!text) return text;
+  const stripped = stripFinalTagsFromText(text);
+  const trimmed = stripped.trim();
+  if (!trimmed) return stripped;
+
+  if (/incorrect role information|roles must alternate/i.test(trimmed)) {
+    return (
+      "Message ordering conflict - please try again. " +
+      "If this persists, use /new to start a fresh session."
+    );
+  }
+
+  if (isContextOverflowError(trimmed)) {
+    return (
+      "Context overflow: prompt too large for the model. " +
+      "Try again with less input or a larger-context model."
+    );
+  }
+
+  if (isRawApiErrorPayload(trimmed) || isLikelyHttpErrorText(trimmed)) {
+    return "The AI service returned an error. Please try again.";
+  }
+
+  if (ERROR_PREFIX_RE.test(trimmed)) {
+    if (isOverloadedErrorMessage(trimmed) || isRateLimitErrorMessage(trimmed)) {
+      return "The AI service is temporarily overloaded. Please try again in a moment.";
+    }
+    if (isTimeoutErrorMessage(trimmed)) {
+      return "LLM request timed out.";
+    }
+    return "The AI service returned an error. Please try again.";
+  }
+
+  return stripped;
 }
 
 export function isRateLimitAssistantError(msg: AssistantMessage | undefined): boolean {
@@ -246,6 +339,8 @@ const ERROR_PATTERNS = {
     "incorrect api key",
     "invalid token",
     "authentication",
+    "re-authenticate",
+    "oauth token refresh failed",
     "unauthorized",
     "forbidden",
     "access denied",
@@ -257,7 +352,6 @@ const ERROR_PATTERNS = {
     "no api key found",
   ],
   format: [
-    "invalid_request_error",
     "string should match pattern",
     "tool_use.id",
     "tool_use_id",
@@ -265,6 +359,10 @@ const ERROR_PATTERNS = {
     "invalid request format",
   ],
 } as const;
+
+const IMAGE_DIMENSION_ERROR_RE =
+  /image dimensions exceed max allowed size for many-image requests:\s*(\d+)\s*pixels/i;
+const IMAGE_DIMENSION_PATH_RE = /messages\.(\d+)\.content\.(\d+)\.image/i;
 
 function matchesErrorPatterns(raw: string, patterns: readonly ErrorPattern[]): boolean {
   if (!raw) return false;
@@ -308,8 +406,31 @@ export function isOverloadedErrorMessage(raw: string): boolean {
   return matchesErrorPatterns(raw, ERROR_PATTERNS.overloaded);
 }
 
+export function parseImageDimensionError(raw: string): {
+  maxDimensionPx?: number;
+  messageIndex?: number;
+  contentIndex?: number;
+  raw: string;
+} | null {
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (!lower.includes("image dimensions exceed max allowed size")) return null;
+  const limitMatch = raw.match(IMAGE_DIMENSION_ERROR_RE);
+  const pathMatch = raw.match(IMAGE_DIMENSION_PATH_RE);
+  return {
+    maxDimensionPx: limitMatch?.[1] ? Number.parseInt(limitMatch[1], 10) : undefined,
+    messageIndex: pathMatch?.[1] ? Number.parseInt(pathMatch[1], 10) : undefined,
+    contentIndex: pathMatch?.[2] ? Number.parseInt(pathMatch[2], 10) : undefined,
+    raw,
+  };
+}
+
+export function isImageDimensionErrorMessage(raw: string): boolean {
+  return Boolean(parseImageDimensionError(raw));
+}
+
 export function isCloudCodeAssistFormatError(raw: string): boolean {
-  return matchesErrorPatterns(raw, ERROR_PATTERNS.format);
+  return !isImageDimensionErrorMessage(raw) && matchesErrorPatterns(raw, ERROR_PATTERNS.format);
 }
 
 export function isAuthAssistantError(msg: AssistantMessage | undefined): boolean {
@@ -318,6 +439,7 @@ export function isAuthAssistantError(msg: AssistantMessage | undefined): boolean
 }
 
 export function classifyFailoverReason(raw: string): FailoverReason | null {
+  if (isImageDimensionErrorMessage(raw)) return null;
   if (isRateLimitErrorMessage(raw)) return "rate_limit";
   if (isOverloadedErrorMessage(raw)) return "rate_limit";
   if (isCloudCodeAssistFormatError(raw)) return "format";
