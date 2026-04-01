@@ -67,5 +67,22 @@ IDENTITY.md
 USER.md
 .tgz
 
+# Python virtualenv/cache
+.venv/
+**/.venv/
+.venv-*/
+**/.venv-*/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+
+# IDE/editor
+.idea/
+**/.idea/
+
 # local tooling
 .serena/

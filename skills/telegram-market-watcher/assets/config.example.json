@@ -1,0 +1,36 @@
+{
+  "product": "supergrok",
+  "needed_quantity": 3,
+  "reply_wait_seconds": 12,
+  "messages_limit": 8,
+  "scoring": {
+    "prefer_lower_price": true,
+    "prefer_higher_stock": true,
+    "min_stock_required": 3,
+    "seller_bonus": {
+      "trusted_seller_a": 10,
+      "trusted_seller_b": 5
+    }
+  },
+  "queries": [
+    "SuperGrok còn hàng không? Giá hiện tại bao nhiêu? Mình cần 3 slot.",
+    "Bên bạn còn gói SuperGrok không, giá và số lượng hiện có thế nào?"
+  ],
+  "sources": [
+    {
+      "name": "trusted_seller_a",
+      "target": "@seller_username",
+      "type": "user"
+    },
+    {
+      "name": "market_bot_1",
+      "target": "@market_bot_username",
+      "type": "bot"
+    },
+    {
+      "name": "deal_channel",
+      "target": "@deal_channel_username",
+      "type": "channel"
+    }
+  ]
+}

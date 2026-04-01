@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "skills": {
+    "self-improving-agent": {
+      "version": "3.0.10",
+      "installedAt": 1774948044980
+    },
+    "Summarize": {
+      "version": "1.0.0",
+      "installedAt": 1774948381833
+    }
+  }
+}
